@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/Iconka-Cat-Commerce-Client.ico</file>
+        <file>icons/Treetog-I-Documents.ico</file>
+    </qresource>
+</RCC>
