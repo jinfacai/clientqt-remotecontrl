@@ -95,8 +95,8 @@ private slots:
     void handleSaveAs(int slotIndex);
     void handleRefuse(int slotIndex);
     void handleAccept(int slotIndex);
-    void handleTextMessage(const QByteArray &data);
-    void handleFileMessage(const QByteArray &dataBody, const PacketHeader &header);
+    void handleTextMessage(uint64_t txtsize);
+    void handleFileMessage(uint32_t flnamelen, uint64_t flsize);
 
 private:
     Ui::Widget *ui;

@@ -1,6 +1,5 @@
 #include "widget.h"
 #include "ui_widget.h"
-//#include "packetheader.h"
 #include <QIcon>
 #include <QMessageBox>
 #include <QTcpSocket>
@@ -178,7 +177,7 @@ void Widget::connectToServer()
     }
     //QTcpSocket *socket = new QTcpSocket(this);
 
-    // ✅ 禁用代理（一定要在连接之前设置）
+    // 禁用代理（一定要在连接之前设置）
     socket->setProxy(QNetworkProxy::NoProxy);
 
     // 开始连接
@@ -244,13 +243,17 @@ void Widget::selectFile()
     ui->fileBrowser->setText(baseName);//在文件browser中显示文件名
 }
 // 计算校验和函数（与服务端逻辑一致）
-quint64 calculateChecksum(const QByteArray &data) {
+quint64 calculateChecksum(const QByteArray &data, size_t len) {
     quint64 sum = 0;
-    for (char byte : data) {
-        sum += static_cast<quint8>(byte); // 将每个字节转换为无符号8位整数并累加
+    // 保证len不超过data.size()
+    size_t length = qMin(len, static_cast<size_t>(data.size()));
+
+    for (size_t i = 0; i < length; ++i) {
+        sum += static_cast<quint8>(data[i]);
     }
     return sum;
 }
+
 // 发送选择的文件到服务器
 void Widget::serveFile()
 {
@@ -272,7 +275,7 @@ void Widget::serveFile()
     QByteArray fileName = QFileInfo(file).fileName().toUtf8();
     int filenameLen = fileName.size();
     //文件为空
-    if (fileData.size() == 0) {
+    if (fileSize == 0) {
         QMessageBox::information(this, "提示", "文件内容为空，无需发送");
         return;
     }
@@ -305,7 +308,7 @@ void Widget::serveFile()
             //文件数据
             packet.append(fileData+currentSize,dataLen);
             // 计算并设置校验和
-            quint64 checksum = calculateChecksum(packet);
+            quint64 checksum = calculateChecksum(packet,packet.size());
             checksum = static_cast<uint64_t>(qToBigEndian(checksum));
             // 将校验和写入包头部（假设PacketHeader中有checksum字段）
             memcpy(reinterpret_cast<char*>(&packetheader) +
@@ -352,7 +355,7 @@ void Widget::serveFile()
         //文本数据
         packet.append(fileData,dataLen);
         // 计算并设置校验和
-        quint64 checksum = calculateChecksum(packet);
+        quint64 checksum = calculateChecksum(packet, packet.size());
         checksum = static_cast<uint64_t>(qToBigEndian(checksum));
         // 将校验和写入包头部（假设PacketHeader中有checksum字段）
         memcpy(reinterpret_cast<char*>(&packetheader) +
@@ -365,6 +368,12 @@ void Widget::serveFile()
         //检查连接状态
         if (socket->state() != QAbstractSocket::ConnectedState) {
             QMessageBox::warning(this, "连接错误", "未连接到服务器");
+            return;
+        }
+        if (bytesWritten != packet.size()) {
+            // 发送失败
+            qWarning() << "发送失败：仅发送了" << bytesWritten << "字节，预期" << packet.size() << "字节";
+            qWarning() << "Socket 错误：" << socket->errorString();
             return;
         }
 
@@ -479,7 +488,7 @@ void Widget::onSendButtonClicked()
             //文本数据
             packet.append(textData+currentSize,dataLen);
             // 计算并设置校验和
-            quint64 checksum = calculateChecksum(packet);
+            quint64 checksum = calculateChecksum(packet, packet.size());
             checksum = static_cast<uint64_t>(qToBigEndian(checksum));
             // 将校验和写入包头部（假设PacketHeader中有checksum字段）
             memcpy(reinterpret_cast<char*>(&packetheader) +
@@ -529,7 +538,7 @@ void Widget::onSendButtonClicked()
         //文本数据
         packet.append(textData,dataLen);
         // 计算并设置校验和
-        quint64 checksum = calculateChecksum(packet);
+        quint64 checksum = calculateChecksum(packet, packet.size());
         checksum = static_cast<uint64_t>(qToBigEndian(checksum));
         // 将校验和写入包头部（假设PacketHeader中有checksum字段）
         memcpy(reinterpret_cast<char*>(&packetheader) +
@@ -624,7 +633,7 @@ void Widget::handleFile(QString& currentFileName,qint64& totalFileSize,bool& isF
     saveAsButton->setVisible(true);
     refuseButton->setVisible(true);
 
-    // 初始化进度条（当前设置为不可见，但初始化数值）
+    // 初始化进度条
     progressBar->setMaximum(static_cast<int>(totalFileSize));
     progressBar->setValue(0); // 初始进度为0
     progressBar->setVisible(false); // 后续在点击"接受"后再显示
@@ -813,128 +822,217 @@ void Widget::onsaveasButton3clicked() {
     handleSaveAs(2);
 }
 
-// 读取数据时处理三个文件
+    // Socket数据可读时触发此函数
 void Widget::onSocketReadyRead() {
-   // m_receiveBuffer += socket->readAll(); // 读取所有数据到缓冲区
+        // 读取所有新数据并追加到缓冲区
+        //QByteArray recvBuffer[BUFFER_SIZE];
+        FileHeader filehead;
+        QByteArray fileheadData = socket->read(sizeof(FileHeader));
+        //报错
+        memcpy(&filehead, fileheadData.constData(), sizeof(FileHeader));
 
-   // while (true) {
-        // 解析协议头（固定长度）
-    //    if (m_receiveBuffer.size() < static_cast<qsizetype>(sizeof(PacketHeader))) {
-     //       break;
-      //  }
-        // 提取协议头并转换字节序（大端转主机序）
-     //   PacketHeader fileheader;
-        // 从接收缓冲区中复制出固定长度的头部数据到本地变量 header
-      //  memcpy(&fileheader, m_receiveBuffer.constData(), sizeof(fileheader));
-        //大端转小端
-        //fileheader.data_len = qFromBigEndian<quint32>(fileheader.data_len);
-        //fileheader = qFromBigEndian<quint32>(fileheader.filename_len);
-       // fileheader.sSum = qFromBigEndian<quint64>(fileheader.sSum);
+        uint8_t verSion = filehead.version;
+        uint8_t msgType = filehead.msg_type;
+        uint32_t filenameLen = qFromBigEndian(filehead.filename_len);
+        uint64_t fileSize = qFromBigEndian(filehead.file_size);
+        uint64_t textSize = qFromBigEndian(filehead.text_size);
 
-        // 计算完整数据包长度（协议头 + 文件名 + 文件内容）
-        //const int totalExpectedSize = sizeof(PacketHeader) + header.filename_len + header.datalen;
-       // if (m_receiveBuffer.size() < totalExpectedSize) {
-        //    break; // 数据不完整，等待下次
-        //}
+        // 验证协议版本和消息类型uint32_t filenameLen
+        if (verSion != MY_PROTOCOOL_VERSION) {
+            qWarning() << "无效的文件协议，丢弃数据";
+            return;
+        }
+        if (msgType != MSG_TYPE_TEXT && msgType != MSG_TYPE_FILE) {
+            qWarning() << "无效的消息内容，丢弃数据";
+            return;
+        }
+        if (filenameLen <= 0 || filenameLen > 256) {
+            qWarning() << "文件名长度异常：" << filenameLen;
+            return;
+        }
+        if (msgType == MSG_TYPE_FILE && fileSize == 0) {
+            qWarning() << "文件内容为空：" << fileSize;
+            return;
+        }
+        if (msgType == MSG_TYPE_TEXT && textSize == 0) {
+            qWarning() << "文本消息内容为空：" << textSize;
+            return;
+        }
+        if (msgType == MSG_TYPE_TEXT) {
+            handleTextMessage(textSize);
+        }
+        else if (msgType == MSG_TYPE_FILE) {
+            handleFileMessage(filenameLen, fileSize);
+        }
+        else {
+            qDebug() << "未知消息类型:" << msgType;
+        }
 
-        // 拆分数据体
-       // QByteArray dataBody = m_receiveBuffer.mid(sizeof(PacketHeader));//接收缓冲区中提取出数据体
-        //m_receiveBuffer.remove(0, totalExpectedSize); // 移除已处理数据
-        // 提取文件名和数据
-        //QByteArray fileNameData = dataBody.left(header.filename_len);
-        //QByteArray contentData = dataBody.mid(header.filename_len);
-
-        // 计算接收数据的校验和
-        //QByteArray validatedData = fileNameData + contentData;
-        //uint32_t calculatedChecksum = calculateChecksum(validatedData);
-
-       // if (calculatedChecksum != header.sSum) {
-       //     qWarning() << "校验和验证失败，丢弃数据";
-       //     return; // 校验失败，直接丢弃
-       // }
-        // 根据消息类型处理
-        //if (header.msg_type == MSG_TYPE_TEXT) {
-       //     handleTextMessage(dataBody);
-       // }
-       // else if (header.msg_type == MSG_TYPE_FILE) {
-       //     handleFileMessage(dataBody, header);
-       // }
-        //else {
-       //     qDebug() << "未知消息类型:" << header.msg_type;
-       // }
-   // }
 }
 
 //处理文本消息
-void Widget::handleTextMessage(const QByteArray &data) {
-    QString text = QString::fromUtf8(data);
-    ui->serveBrowser->append(QString("[服务器] %1").arg(text));
+void Widget::handleTextMessage(uint64_t txtsize) {
+    PacketHeader packethead;
+    qint64 totalsize = static_cast<qint64>(sizeof(PacketHeader) + txtsize);
+    qint64 currentsize = BUFFER_SIZE;
+    int recvsize = 0;
+    if (totalsize > BUFFER_SIZE) {
+        while (recvsize < totalsize) {
+            QByteArray packtxtData = socket->read(BUFFER_SIZE);
+            memcpy(&packethead, packtxtData.constData(), sizeof(PacketHeader));
+            uint32_t datalen = qFromBigEndian(packethead.data_len);
+            uint64_t checkSum = qFromBigEndian(packethead.sSum);
+            //复制数据包
+            QByteArray verifyData = packtxtData;
+            size_t sSumOffset = offsetof(PacketHeader, sSum);
+            //memset(verifyData.constData() + sSumOffset, 0, sizeof(uint64_t));//置零
+            memset(verifyData.data() + sSumOffset, 0, sizeof(uint64_t));
+            //计算整个数据包校验和
+            uint64_t currentcheckSum = calculateChecksum(verifyData.constData(), verifyData.size());
+            if (currentcheckSum != checkSum) {
+                qDebug() << "Checksum mismatch! Corrupted data.";
+            }
+            char txtbuffer[BUFFER_SIZE];
+            memcpy(txtbuffer, packtxtData.constData() + sizeof(PacketHeader), datalen);
+            //uint64_t currentsum = calculateChecksum()
+            recvsize += datalen;
+            QString text = QString::fromUtf8(txtbuffer, datalen); // UTF-8编码
+
+            ui->serveBrowser->append(QString("[服务器] %1").arg(text));
+        }
+    }
+    else {
+        QByteArray packtxtData = socket->read(BUFFER_SIZE);
+        memcpy(&packethead, packtxtData.constData(), sizeof(PacketHeader));
+        uint32_t datalen = qFromBigEndian(packethead.data_len);
+        uint64_t checkSum = qFromBigEndian(packethead.sSum);
+        //复制数据包
+        QByteArray verifyData = packtxtData;
+        size_t sSumOffset = offsetof(PacketHeader, sSum);
+        memset(verifyData.data() + sSumOffset, 0, sizeof(uint64_t));//置零
+        //计算整个数据包校验和
+        uint64_t currentcheckSum = calculateChecksum(verifyData.constData(), verifyData.size());
+        if (currentcheckSum != checkSum) {
+            qDebug() << "Checksum mismatch! Corrupted data.";
+        }
+        char txtbuffer[BUFFER_SIZE];
+        memcpy(txtbuffer, packtxtData.constData() + sizeof(PacketHeader), datalen);
+        QString text = QString::fromUtf8(txtbuffer, datalen); // UTF-8编码
+        ui->serveBrowser->append(QString("[服务器] %1").arg(text));
+    }
 }
 
 //处理文件消息
-void Widget::handleFileMessage(const QByteArray &dataBody, const PacketHeader &header) {
-//    // 提取文件名和内容（使用协议头中的主机字节序数据）
-//    QByteArray fileNameData = dataBody.left(header.filename_len);
-//    //将提取出的文件名数据从 UTF-8 编码转换为 QString 字符串
-//    QString fileName = QString::fromUtf8(fileNameData);
-//    // 从 dataBody 中提取出文件内容部分的数据，
-//    QByteArray fileContent = dataBody.mid(header.filename_len, header.datalen);
+void Widget::handleFileMessage(uint32_t flnamelen, uint64_t flsize) {
+    QString filename;
+    char flbuffer;
+    PacketHeader packethead;
+    int totalsize = sizeof(PacketHeader) + flnamelen + flsize;
+    int currentsize = BUFFER_SIZE;
+    int recvsize = 0;
+    if (totalsize > BUFFER_SIZE) {
+        while (recvsize < totalsize) {
+            QByteArray packtxtData = socket->read(BUFFER_SIZE);
+            memcpy(&packethead, packtxtData.constData(), sizeof(PacketHeader));
+            uint32_t datalen = qFromBigEndian(packethead.data_len);
+            uint64_t checkSum = qFromBigEndian(packethead.sSum);
+            //复制数据包
+            QByteArray verifyData = packtxtData;
+            size_t sSumOffset = offsetof(PacketHeader, sSum);
+            memset(verifyData.data() + sSumOffset, 0, sizeof(uint64_t));//置零
+            //计算整个数据包校验和
+            uint64_t currentcheckSum = calculateChecksum(verifyData.constData(), verifyData.size());
+            if (currentcheckSum != checkSum) {
+                qDebug() << "Checksum mismatch! Corrupted data.";
+            }
+            char flname[BUFFER_SIZE];
+            memcpy(flname, packtxtData.constData() + sizeof(PacketHeader), flnamelen);
+            QString filename = QString::fromUtf8(flname, datalen);
+            char flbuffer[BUFFER_SIZE];
+            memcpy(flbuffer, packtxtData.constData() + sizeof(PacketHeader) + flnamelen, datalen);
+            recvsize += datalen;
+            //QString text = QString::fromUtf8(txtbuffer, datalen); // UTF-8编码
+            //ui->serveBrowser->append(QString("[服务器] %1").arg(text));
+        }
+    }
+    else {
+        //读取数据包
+        QByteArray packtxtData = socket->read(BUFFER_SIZE);
+        //解析数据包
+        memcpy(&packethead, packtxtData.constData(), sizeof(PacketHeader));
+        uint32_t datalen = qFromBigEndian(packethead.data_len);
+        uint64_t checkSum = qFromBigEndian(packethead.sSum);
+        //复制数据包
+        QByteArray verifyData = packtxtData;
+        size_t sSumOffset = offsetof(PacketHeader, sSum);
+        memset(verifyData.data() + sSumOffset, 0, sizeof(uint64_t));//置零
+        //计算整个数据包校验和
+        uint64_t currentcheckSum = calculateChecksum(verifyData.constData(), verifyData.size());
+        if (currentcheckSum != checkSum) {
+            qDebug() << "Checksum mismatch! Corrupted data.";
+        }
+        char flname[BUFFER_SIZE];
+        memcpy(flname, packtxtData.constData() + sizeof(PacketHeader), flnamelen);
+        QString filename = QString::fromUtf8(flname, datalen);
+        char flbuffer[BUFFER_SIZE];
+        memcpy(flbuffer, packtxtData.constData() + sizeof(PacketHeader) + flnamelen, datalen);
+    }
 
-    // 遍历3个槽位，寻找可用槽位
-//    for (int slotIndex = 0; slotIndex < 3; ++slotIndex) {
+     // 遍历3个槽位，寻找可用槽位
+    for (int slotIndex = 0; slotIndex < 3; ++slotIndex) {
         // 获取槽位状态引用
- //       bool& isFilePending = (slotIndex == 0) ? isFilePending1 :
-//                                 (slotIndex == 1) ? isFilePending2 : isFilePending3;
-//        QString& currentFileName = (slotIndex == 0) ? currentFileName1 :
-  //                                     (slotIndex == 1) ? currentFileName2 : currentFileName3;
-//        qint64& totalFileSize = (slotIndex == 0) ? totalFileSize1 :
- //                                   (slotIndex == 1) ? totalFileSize2 : totalFileSize3;
-//        QFile*& currentFile = (slotIndex == 0) ? currentFile1 :
- //                                 (slotIndex == 1) ? currentFile2 : currentFile3;
-//        qint64& currentFileSize = (slotIndex == 0) ? currentFileSize1 :
-  //                                    (slotIndex == 1) ? currentFileSize2 : currentFileSize3;
+        bool& isFilePending = (slotIndex == 0) ? isFilePending1 :
+                                (slotIndex == 1) ? isFilePending2 : isFilePending3;
+        QString& currentFileName = (slotIndex == 0) ? currentFileName1 :
+                                     (slotIndex == 1) ? currentFileName2 : currentFileName3;
+        qint64& totalFileSize = (slotIndex == 0) ? totalFileSize1 :
+                                  (slotIndex == 1) ? totalFileSize2 : totalFileSize3;
+        QFile*& currentFile = (slotIndex == 0) ? currentFile1 :
+                                (slotIndex == 1) ? currentFile2 : currentFile3;
+        qint64& currentFileSize = (slotIndex == 0) ? currentFileSize1 :
+                                (slotIndex == 1) ? currentFileSize2 : currentFileSize3;
 
         // 检查槽位是否可用（未占用、无pending文件、无当前文件）
-//        if (!fileSlotsOccupied[slotIndex] && !isFilePending && currentFile == nullptr) {
+         if (!fileSlotsOccupied[slotIndex] && !isFilePending && currentFile == nullptr) {
             // 绑定文件信息到槽位
- //           currentFileName = fileName;
- //           totalFileSize = header.datalen; // 协议头已转为主机字节序
-//            isFilePending = true;
- //           fileSlotsOccupied[slotIndex] = true;
- //           m_pendingFileDatas[slotIndex] = fileContent; // 暂存文件内容
+            currentFileName = filename;
+            totalFileSize = flsize;
+            isFilePending = true;
+            fileSlotsOccupied[slotIndex] = true;
+            //m_pendingFileDatas[slotIndex] = flbuffer; // 暂存文件内容
 
             // 获取UI组件指针
-//            QLabel* fileIconLabel = (slotIndex == 0) ? ui->fileicolabel1 :
- //                                       (slotIndex == 1) ? ui->fileicolabel2 : ui->fileicolabel3;
-//            QLabel* fileNameLabel = (slotIndex == 0) ? ui->filenamelabel1 :
- //                                       (slotIndex == 1) ? ui->filenamelabel2 : ui->filenamelabel3;
-//            QLabel* fileSizeLabel = (slotIndex == 0) ? ui->filesizelabel1 :
- //                                       (slotIndex == 1) ? ui->filesizelabel2 : ui->filesizelabel3;
-  //          QPushButton* acceptButton = (slotIndex == 0) ? ui->acceptButton1 :
- //                                           (slotIndex == 1) ? ui->acceptButton2 : ui->acceptButton3;
- //           QPushButton* saveAsButton = (slotIndex == 0) ? ui->saveasButton1 :
- //                                           (slotIndex == 1) ? ui->saveasButton2 : ui->saveasButton3;
-  //          QPushButton* refuseButton = (slotIndex == 0) ? ui->refuseButton1 :
-  //                                          (slotIndex == 1) ? ui->refuseButton2 : ui->refuseButton3;
- //           QProgressBar* progressBar = (slotIndex == 0) ? ui->progressBar1 :
- //                                           (slotIndex == 1) ? ui->progressBar2 : ui->progressBar3;
+            QLabel* fileIconLabel = (slotIndex == 0) ? ui->fileicolabel1 :
+                                (slotIndex == 1) ? ui->fileicolabel2 : ui->fileicolabel3;
+            QLabel* fileNameLabel = (slotIndex == 0) ? ui->filenamelabel1 :
+                                (slotIndex == 1) ? ui->filenamelabel2 : ui->filenamelabel3;
+            QLabel* fileSizeLabel = (slotIndex == 0) ? ui->filesizelabel1 :
+                                (slotIndex == 1) ? ui->filesizelabel2 : ui->filesizelabel3;
+            QPushButton* acceptButton = (slotIndex == 0) ? ui->acceptButton1 :
+                                (slotIndex == 1) ? ui->acceptButton2 : ui->acceptButton3;
+            QPushButton* saveAsButton = (slotIndex == 0) ? ui->saveasButton1 :
+                                 (slotIndex == 1) ? ui->saveasButton2 : ui->saveasButton3;
+            QPushButton* refuseButton = (slotIndex == 0) ? ui->refuseButton1 :
+                                 (slotIndex == 1) ? ui->refuseButton2 : ui->refuseButton3;
+            QProgressBar* progressBar = (slotIndex == 0) ? ui->progressBar1 :
+                                 (slotIndex == 1) ? ui->progressBar2 : ui->progressBar3;
 
-            // 调用 handleFile 函数来显示文件信息和更新 serveBrowser
- //           handleFile(
- //               currentFileName,
- //               totalFileSize,
- //               isFilePending,
- //               fileIconLabel,
- //               fileNameLabel,
-  //              fileSizeLabel,
-  //              acceptButton,
-  //              saveAsButton,
-  //              refuseButton,
- //               progressBar,
-//                ui->serveBrowser // 传递 serveBrowser 指针
-//                );
-//
- //           break; // 找到可用槽位后跳出循环
- //       }
-//    }
+         //调用 handleFile 函数来显示文件信息和更新 serveBrowser
+         handleFile(
+             currentFileName,
+             totalFileSize,
+             isFilePending,
+             fileIconLabel,
+             fileNameLabel,
+             fileSizeLabel,
+             acceptButton,
+             saveAsButton,
+             refuseButton,
+             progressBar,
+             ui->serveBrowser // 传递 serveBrowser 指针
+              );
+
+             break; // 找到可用槽位后跳出循环
+         }
+    }
 }
