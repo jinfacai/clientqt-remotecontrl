@@ -40,7 +40,7 @@ struct FileRecvInfo {
     quint32 chunk_count;
     QFile* file;
     QVector<bool> received;
-    int received_chunks;
+    quint32 received_chunks;
     bool accepted;
     QString saveasPath;
     QMap<quint32, QByteArray> cached_chunks; // 缓存未接受的文件块

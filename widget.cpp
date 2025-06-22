@@ -900,6 +900,10 @@ int Widget::findSlotByMsgId(quint32 msg_id)
 //更新槽
 void Widget::updateFileSlot(int slot, const QString& filename, quint64 filesize, int progress)
 {
+    if (slot < 0 || slot > 2) {
+        qWarning() << "updateFileSlot: invalid slot" << slot;
+        return;
+    }
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
     QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
@@ -914,6 +918,12 @@ void Widget::updateFileSlot(int slot, const QString& filename, quint64 filesize,
 //清楚文件槽
 void Widget::clearFileSlot(int slot)
 {
+    // 1) 范围检查，防止 slot 越界
+    if (slot < 0 || slot >= 3) {
+        qWarning() << "clearFileSlot: invalid slot" << slot;
+        return;
+    }
+
     slotMsgIds[slot] = 0;
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
@@ -1180,6 +1190,8 @@ void Widget::checkForCompletion(quint32 msg_id)
             QMessageBox::information(this, "文件接收完成", QString("文件 '%1' 已成功接收。").arg(info.filename));
             // 可以在这里延迟后清理槽位
             // clearFileSlot(slot);
+            clearFileSlot(slot);
+            recvFiles.remove(msg_id);
         }
     }
 }
