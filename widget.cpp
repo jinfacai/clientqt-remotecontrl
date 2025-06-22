@@ -969,10 +969,17 @@ void Widget::handleAccept(int slotIndex)
     if (!recvFiles.contains(msg_id)) return;
     FileRecvInfo& info = recvFiles[msg_id];
     info.accepted = true;
+
+    // 设置默认保存目录
+    QString defaultDir = "D:/git/serverqt/serverqt/download";
+    QDir().mkpath(defaultDir); // 确保目录存在
+    QString savePath = defaultDir + "/" + info.filename;
+    info.saveasPath = savePath;
+
     if (!info.file) {
-        info.file = new QFile(info.filename);
+        info.file = new QFile(savePath);
         if (!info.file->open(QIODevice::WriteOnly)) {
-            QMessageBox::critical(this, "错误", "无法创建接收文件");
+            QMessageBox::critical(this, "错误", "无法创建接收文件: " + savePath);
             delete info.file;
             info.file = nullptr;
             return;
@@ -1028,9 +1035,7 @@ void Widget::handleAccept(int slotIndex)
         }
     }
 
-    // 检查是否完成
-    checkForCompletion(msg_id);
-
+    // 只隐藏操作按钮，进度条等UI清理交给checkForCompletion
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
     QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
@@ -1046,6 +1051,13 @@ void Widget::handleAccept(int slotIndex)
     nameLabel[slotIndex]->setVisible(true);
     sizeLabel[slotIndex]->setVisible(true);
     fileicolabel[slotIndex]->setVisible(true);
+
+    checkForCompletion(msg_id);
+
+    qDebug() << "handleAccept后状态: accepted=" << info.accepted
+             << "end_received=" << info.end_received
+             << "received_chunks=" << info.received_chunks
+             << "chunk_count=" << info.chunk_count;
 }
 
 //处理另存为按键
