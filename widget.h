@@ -1,53 +1,64 @@
 #ifndef WIDGET_H
 #define WIDGET_H
-//#include "packetheader.h"
+
 #include <QWidget>
 #include <QTcpSocket>
-#include <QTcpServer>
-#include <QDataStream>
 #include <QFile>
-#include <QLabel>
-#include <QPushButton>
-#include <QProgressBar>
-#include <QTextBrowser>
-#include <QtGlobal>
-
-// 修正后的协议包头（与服务端完全一致）
-#pragma pack(push, 1)
-struct FileHeader{
-    uint8_t  version;//1字节
-    uint8_t  msg_type;//1字节
-    uint32_t filename_len;//4字节 文件名长度
-    uint64_t file_size;//8字节 整个文件大小
-    uint64_t text_size;//8字节 文本消息大小
-};//(22)
-//协议包头
-typedef struct PacketHeader{
-    uint32_t data_len;//4字节 当前数据包长度
-    uint64_t sSum;//8字节
-};//(12)
-
-#pragma pack(pop)
-
-struct FileSlot {
-    QString& currentFileName;
-    qint64& totalFileSize;
-    QFile*& currentFile;
-    qint64& currentFileSize;
-    bool& isFilePending;
-    QLabel* fileIconLabel;
-    QLabel* fileNameLabel;
-    QLabel* fileSizeLabel;
-    QProgressBar* progressBar;
-    QPushButton* acceptButton;
-    QPushButton* saveasButton;
-    QPushButton* refuseButton;
-};
-
+#include <QTimer>
+#include <QVector>
+#include <QMap>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
 QT_END_NAMESPACE
+
+#define MY_PROTOCOOL_VERSION 1
+#define MSG_TYPE_TEXT 1
+#define MSG_TYPE_FILE_START 6
+#define MSG_TYPE_FILE_CHUNK 5
+#define MSG_TYPE_FILE_END 7
+#define MSG_TYPE_ACK 3
+#define CHUNK_SIZE 32768
+
+#pragma pack(push, 1)
+struct PacketHeader {
+    quint8  version;
+    quint8  msg_type;
+    quint32 datalen;
+    quint32 filename_len;
+    quint64 file_size;
+    quint32 msg_id;
+    quint32 chunk_index;
+    quint32 chunk_count;
+    quint32 sender_id;
+};
+#pragma pack(pop)
+
+struct FileRecvInfo {
+    QString filename;
+    quint64 filesize;
+    quint32 chunk_count;
+    QFile* file;
+    QVector<bool> received;
+    int received_chunks;
+    bool accepted;
+    QString saveasPath;
+    QMap<quint32, QByteArray> cached_chunks; // 缓存未接受的文件块
+    bool end_received; // 新增：标记是否收到文件结束包
+    FileRecvInfo() : filesize(0), chunk_count(0), file(nullptr), received_chunks(0), accepted(false), end_received(false) {}
+};
+
+struct FileSendTask {
+    QFile* file;
+    quint32 msg_id;
+    quint32 chunk_count;
+    quint32 current_chunk;
+    QVector<bool> acked;
+    QTimer* timer;
+    QString filename;
+    quint64 filesize;
+    FileSendTask() : file(nullptr), msg_id(0), chunk_count(0), current_chunk(0), timer(nullptr), filesize(0) {}
+};
 
 class Widget : public QWidget
 {
@@ -60,67 +71,61 @@ public:
 private slots:
     void connectToServer();
     void onConnected();
-    void onDisconnected();
     void onError(QAbstractSocket::SocketError socketError);
-    void selectFile();
-    void serveFile();
     void onSocketReadyRead();
     void onSendButtonClicked();
-    void onSendButtonError(QAbstractSocket::SocketError socketError);
-    void onSendFileError(QAbstractSocket::SocketError socketError);
-    bool validateInput(QString& ip, quint16& port);
-    void onacceptButton1clicked();      // 接受文件
-    void onsaveasButton1clicked();      // 另存为文件
-    void onrefuseButton1clicked();      // 拒绝文件
-    void onacceptButton2clicked();      // 接受文件
-    void onsaveasButton2clicked();      // 另存为文件
-    void onrefuseButton2clicked();      // 拒绝文件
-    void onacceptButton3clicked();      // 接受文件
-    void onsaveasButton3clicked();      // 另存为文件
-    void onrefuseButton3clicked();      // 拒绝文件
-    void handleFile(
-        QString& currentFileName,
-        qint64& totalFileSize,
-        bool& isFilePending,
-        QLabel* fileIconLabel,
-        QLabel* fileNameLabel,
-        QLabel* fileSizeLabel,
-        QPushButton* acceptButton,
-        QPushButton* saveAsButton,
-        QPushButton* refuseButton,
-        QProgressBar* progressBar,
-        QTextBrowser* serveBrowser
-        );
-    //void handleFileMessage(const QByteArray &dataBody, const PacketHeader &header);
+    void selectFile();
+    void serveFile();
+    //void onSendFileError(QAbstractSocket::SocketError socketError);
+
+    // 文件槽按钮
+    void onacceptButton1clicked();
+    void onacceptButton2clicked();
+    void onacceptButton3clicked();
+    void onrefuseButton1clicked();
+    void onrefuseButton2clicked();
+    void onrefuseButton3clicked();
+    void onsaveasButton1clicked();
+    void onsaveasButton2clicked();
+    void onsaveasButton3clicked();
+
+    void handleAccept(int slotIndex);
     void handleSaveAs(int slotIndex);
     void handleRefuse(int slotIndex);
-    void handleAccept(int slotIndex);
-    void handleTextMessage(uint64_t txtsize);
-    void handleFileMessage(uint32_t flnamelen, uint64_t flsize);
+
+private:
+    QString formatFileSize(quint64 bytes);
+    void sendTextMessage(const QString& text);
+    void sendFile(const QString& path);
+    void sendFileChunk(QFile& file, quint32 msg_id, quint32 chunk_index, quint32 chunk_count, quint32 sender_id);
+    void sendAck(quint32 msg_id, quint32 chunk_index);
+
+    void handleTextMessage(const PacketHeader& header);
+    void handleFileStart(const PacketHeader& header);
+    void handleFileChunk(const PacketHeader& header);
+    void handleFileEnd(const PacketHeader& header);
+    void handleAck(const PacketHeader& header);
+
+    void updateFileSlot(int slot, const QString& filename, quint64 filesize, int progress);
+    void clearFileSlot(int slot);
+
+    int findFreeSlot();
+    int findSlotByMsgId(quint32 msg_id);
+    void checkForCompletion(quint32 msg_id);
+
+    quint32 nextMsgId();
+    quint32 clientId = 0;
+    quint32 lastMsgId = 0;
 
 private:
     Ui::Widget *ui;
     QTcpSocket* socket;
-    QTcpServer* tcpServer;
-    QTcpSocket* serverSocket;    // 接受客户端（其实就是本程序的 clientSocket）的连接
-    qint64 blockSize;
     QString selectedFilePath;
-    QByteArray m_receiveBuffer;
-    QVector<bool> fileSlotsOccupied;
-    QVector<QByteArray> m_pendingFileDatas;
-    QVector<FileSlot> fileSlots; // 槽位状态数组
-    const quint8 PROTOCOL_VERSION = 1;
-    const quint8 MSG_TEXT = 1;
-    const quint8 MSG_FILE = 2;
-    bool m_isHeaderParsed = false;    // 是否已解析协议头
-    PacketHeader m_currentHeader;     // 当前消息的协议头
-    QString currentFileName1, currentFileName2, currentFileName3;
-    qint64 totalFileSize1 = 0, totalFileSize2 = 0, totalFileSize3 = 0;
-    QFile *currentFile1 = nullptr, *currentFile2 = nullptr, *currentFile3 = nullptr;
-    qint64 currentFileSize1 = 0, currentFileSize2 = 0, currentFileSize3 = 0;
-    bool isFilePending1 = false, isFilePending2 = false, isFilePending3 = false;
-
-protected:
-    void closeEvent(QCloseEvent *event) override;
+    QMap<quint32, FileRecvInfo> recvFiles; // msg_id -> FileRecvInfo
+    QVector<quint32> slotMsgIds; // 槽位对应的msg_id
+    QMap<quint32, FileSendTask> sendTasks;
+    void sendNextChunk(quint32 msg_id);
+    void resendCurrentChunk(quint32 msg_id);
 };
+
 #endif // WIDGET_H
