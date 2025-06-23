@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QVector>
 #include <QMap>
+#include <QDir>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
@@ -18,6 +19,7 @@ QT_END_NAMESPACE
 #define MSG_TYPE_FILE_CHUNK 5
 #define MSG_TYPE_FILE_END 7
 #define MSG_TYPE_ACK 3
+#define MSG_TYPE_ID_ASSIGN 8
 #define CHUNK_SIZE 32768
 
 #pragma pack(push, 1)
@@ -43,9 +45,10 @@ struct FileRecvInfo {
     quint32 received_chunks;
     bool accepted;
     QString saveasPath;
-    QMap<quint32, QByteArray> cached_chunks; // 缓存未接受的文件块
-    bool end_received; // 新增：标记是否收到文件结束包
-    FileRecvInfo() : filesize(0), chunk_count(0), file(nullptr), received_chunks(0), accepted(false), end_received(false) {}
+    bool end_received;
+    QString tempFilePath; // 临时文件路径
+    bool acceptProgressInitialized; // 新增：接受时是否初始化进度条
+    FileRecvInfo() : filesize(0), chunk_count(0), file(nullptr), received_chunks(0), accepted(false), end_received(false), acceptProgressInitialized(false) {}
 };
 
 struct FileSendTask {
@@ -105,6 +108,7 @@ private:
     void handleFileChunk(const PacketHeader& header);
     void handleFileEnd(const PacketHeader& header);
     void handleAck(const PacketHeader& header);
+    void handleIdAssign(const PacketHeader& header);
 
     void updateFileSlot(int slot, const QString& filename, quint64 filesize, int progress);
     void clearFileSlot(int slot);
@@ -116,6 +120,8 @@ private:
     quint32 nextMsgId();
     quint32 clientId = 0;
     quint32 lastMsgId = 0;
+
+    void initAcceptProgress(int slotIndex, FileRecvInfo& info);
 
 private:
     Ui::Widget *ui;

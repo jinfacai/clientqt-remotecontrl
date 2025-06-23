@@ -15,6 +15,7 @@ Widget::Widget(QWidget *parent)
     , socket(new QTcpSocket(this))
 {
     ui->setupUi(this);
+    setWindowTitle("Chat Client (Not Connected)");
 
     // 连接按钮点击信号到对应槽函数
     connect(ui->serveButton, &QPushButton::clicked, this, &Widget::connectToServer);
@@ -122,6 +123,7 @@ void Widget::connectToServer()
 void Widget::onConnected()
 {
     QMessageBox::information(this, "连接成功", "已成功连接到服务器");
+    setWindowTitle("Chat Client (Waiting for ID)");
 }
 
 // 连接错误处理
@@ -642,6 +644,9 @@ void Widget::onSocketReadyRead()
         case MSG_TYPE_ACK:
             handleAck(header);
             break;
+        case MSG_TYPE_ID_ASSIGN:
+            handleIdAssign(header);
+            break;
         default:
             socket->read(datalen + filename_len); // 跳过未知数据
             break;
@@ -674,7 +679,6 @@ void Widget::handleFileStart(const PacketHeader& header)
     quint64 filesize = qFromBigEndian(header.file_size);
     quint32 msg_id = qFromBigEndian(header.msg_id);
     QByteArray filenameData = socket->read(filename_len);
-    // 检查数据长度
     if (filenameData.size() != filename_len) {
         qCritical() << "文件名数据读取失败: 期望" << filename_len << "字节, 实际读取"
                     << filenameData.size() << "字节";
@@ -691,12 +695,24 @@ void Widget::handleFileStart(const PacketHeader& header)
     info.accepted = false;
     info.saveasPath = "";
     info.file = nullptr;
+    info.end_received = false;
+    info.acceptProgressInitialized = false;
+    // 创建临时文件
+    QString tempPath = QDir::temp().filePath(filename + ".part");
+    info.tempFilePath = tempPath;
+    info.file = new QFile(tempPath);
+    if (!info.file->open(QIODevice::WriteOnly)) {
+        QMessageBox::critical(this, "错误", "无法创建临时文件: " + tempPath);
+        delete info.file;
+        info.file = nullptr;
+        return;
+    }
     recvFiles[msg_id] = info;
     int slot = findFreeSlot();
     if (slot != -1) {
         slotMsgIds[slot] = msg_id;
         updateFileSlot(slot, filename, filesize, 0);
-        // 显示按钮
+        // 只显示文件名、大小和操作按钮，进度条保持隐藏
         QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
         QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
         QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
@@ -704,10 +720,9 @@ void Widget::handleFileStart(const PacketHeader& header)
         QPushButton* saveasBtn[3] = {ui->saveasButton1, ui->saveasButton2, ui->saveasButton3};
         QPushButton* refuseBtn[3] = {ui->refuseButton1, ui->refuseButton2, ui->refuseButton3};
         QLabel* fileicolabel[3] = {ui->fileicolabel1,ui->fileicolabel2,ui->fileicolabel3};
-
         nameLabel[slot]->setVisible(true);
         sizeLabel[slot]->setVisible(true);
-        bar[slot]->setVisible(false);
+        bar[slot]->setVisible(false); // 进度条隐藏
         acceptBtn[slot]->setVisible(true);
         saveasBtn[slot]->setVisible(true);
         refuseBtn[slot]->setVisible(true);
@@ -723,99 +738,66 @@ void Widget::handleFileChunk(const PacketHeader& header)
     quint32 chunk_index = qFromBigEndian(header.chunk_index);
     quint32 datalen = qFromBigEndian(header.datalen);
     QByteArray chunk = socket->read(datalen);
-    // 检查数据长度
     if (chunk.size() != datalen) {
         QString errorMsg = QString("文件块数据读取不完整\n期望: %1 字节\n实际: %2 字节\n块索引: %3/%4")
                                .arg(datalen)
                                .arg(chunk.size())
                                .arg(chunk_index)
                                .arg(qFromBigEndian(header.chunk_count));
-
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
         return;
     }
-    // 检查消息ID是否存在
     if (!recvFiles.contains(msg_id)) {
         QString errorMsg = QString("无效的文件传输ID: %1\n块索引: %2")
                                .arg(msg_id)
                                .arg(chunk_index);
-
         qWarning() << errorMsg;
         return;
     }
     FileRecvInfo& info = recvFiles[msg_id];
-
-    // 检查文件是否已接受并打开 - 这是关键修改
-    if (!info.accepted || !info.file) {
-        qDebug() << "文件块被缓存 (未接受或文件未打开)"
-                 << "msg_id:" << msg_id
-                 << "chunk_index:" << chunk_index
-                 << "accepted:" << info.accepted
-                 << "file:" << (info.file ? "已打开" : "未打开");
-
-        // 缓存文件块，等待用户接受后再写入
-        info.cached_chunks[chunk_index] = chunk;
-
-        // 发送ACK但不写入文件，因为文件还未被接受
-        sendAck(msg_id, chunk_index);
+    if (!info.file) {
+        qWarning() << "未打开临时文件，丢弃分片";
         return;
     }
-
-    // 检查块索引是否有效
     if (chunk_index >= info.chunk_count) {
         QString errorMsg = QString("无效的块索引\n接收: %1\n最大: %2\n文件: %3")
                                .arg(chunk_index)
                                .arg(info.chunk_count - 1)
                                .arg(info.filename);
-
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
         return;
     }
     qint64 offset = qint64(chunk_index) * CHUNK_SIZE;
-    // 定位文件位置
     if (!info.file->seek(offset)) {
         QString errorMsg = QStringLiteral("文件定位失败\n位置: %1\n文件: %2\n错误: %3")
-                               .arg(QString::number(offset),         // %1 ← QString
-                                    info.filename,                   // %2 ← QString
-                                    info.file->errorString());       // %3 ← QString
-
+                               .arg(QString::number(offset), info.filename, info.file->errorString());
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
         return;
     }
-    // 写入文件块
     qint64 written = info.file->write(chunk);
     if (written != chunk.size()) {
         QString errorMsg = QStringLiteral("文件写入失败\n期望: %1 字节\n实际: %2 字节\n文件: %3\n错误: %4")
-                               .arg(QString::number(chunk.size()),  // %1 ← QString
-                                    QString::number(written),         // %2 ← QString
-                                    info.filename,                   // %3 ← QString
-                                    info.file->errorString());       // %4 ← QString
+                               .arg(QString::number(chunk.size()), QString::number(written), info.filename, info.file->errorString());
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
         return;
     }
-    // 更新接收状态
     if (!info.received[chunk_index]) {
         info.received[chunk_index] = true;
         info.received_chunks++;
-        qDebug() << "成功接收文件块"
-                 << "msg_id:" << msg_id
-                 << "chunk_index:" << chunk_index
-                 << "size:" << chunk.size()
-                 << "进度:" << info.received_chunks << "/" << info.chunk_count;
     }
     int slot = findSlotByMsgId(msg_id);
     if (slot != -1) {
-        int progress = int(double(info.received_chunks) / info.chunk_count * 100);
-        updateFileSlot(slot, info.filename, info.filesize, progress);
+        // 只有已接受时才更新进度条
+        if (info.accepted && info.acceptProgressInitialized) {
+            int progress = int(double(info.received_chunks) / info.chunk_count * 100);
+            updateFileSlot(slot, info.filename, info.filesize, progress);
+        }
     }
-
-    // 检查是否完成
     checkForCompletion(msg_id);
-
     sendAck(msg_id, chunk_index);
 }
 
@@ -969,73 +951,14 @@ void Widget::handleAccept(int slotIndex)
     if (!recvFiles.contains(msg_id)) return;
     FileRecvInfo& info = recvFiles[msg_id];
     info.accepted = true;
-
-    // 设置默认保存目录
     QString defaultDir = "D:/git/serverqt/serverqt/download";
-    QDir().mkpath(defaultDir); // 确保目录存在
+    QDir().mkpath(defaultDir);
     QString savePath = defaultDir + "/" + info.filename;
     info.saveasPath = savePath;
-
-    if (!info.file) {
-        info.file = new QFile(savePath);
-        if (!info.file->open(QIODevice::WriteOnly)) {
-            QMessageBox::critical(this, "错误", "无法创建接收文件: " + savePath);
-            delete info.file;
-            info.file = nullptr;
-            return;
-        }
-    }
-
-    // 处理缓存的文件块
-    if (!info.cached_chunks.isEmpty()) {
-        qDebug() << "处理缓存的文件块，数量:" << info.cached_chunks.size();
-        for (auto it = info.cached_chunks.begin(); it != info.cached_chunks.end(); ++it) {
-            quint32 chunk_index = it.key();
-            const QByteArray& chunk = it.value();
-
-            // 检查块索引是否有效
-            if (chunk_index >= info.chunk_count) {
-                qWarning() << "缓存的块索引无效:" << chunk_index << ">==" << info.chunk_count;
-                continue;
-            }
-
-            qint64 offset = qint64(chunk_index) * CHUNK_SIZE;
-            // 定位文件位置
-            if (!info.file->seek(offset)) {
-                qCritical() << "文件定位失败，位置:" << offset << "文件:" << info.filename;
-                continue;
-            }
-
-            // 写入文件块
-            qint64 written = info.file->write(chunk);
-            if (written != chunk.size()) {
-                qCritical() << "文件写入失败，期望:" << chunk.size() << "实际:" << written;
-                continue;
-            }
-
-            // 更新接收状态
-            if (!info.received[chunk_index]) {
-                info.received[chunk_index] = true;
-                info.received_chunks++;
-                qDebug() << "成功写入缓存的文件块"
-                         << "chunk_index:" << chunk_index
-                         << "size:" << chunk.size()
-                         << "进度:" << info.received_chunks << "/" << info.chunk_count;
-            }
-        }
-
-        // 清空缓存
-        info.cached_chunks.clear();
-
-        // 更新进度条
-        int slot = findSlotByMsgId(msg_id);
-        if (slot != -1) {
-            int progress = int(double(info.received_chunks) / info.chunk_count * 100);
-            updateFileSlot(slot, info.filename, info.filesize, progress);
-        }
-    }
-
-    // 只隐藏操作按钮，进度条等UI清理交给checkForCompletion
+    // 不再立即 close/rename，等 checkForCompletion
+    // if (info.file) info.file->close();
+    // QFile::rename(info.tempFilePath, savePath);
+    // UI相关
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
     QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
@@ -1043,17 +966,16 @@ void Widget::handleAccept(int slotIndex)
     QPushButton* saveasBtn[3] = {ui->saveasButton1, ui->saveasButton2, ui->saveasButton3};
     QPushButton* refuseBtn[3] = {ui->refuseButton1, ui->refuseButton2, ui->refuseButton3};
     QLabel* fileicolabel[3] = {ui->fileicolabel1,ui->fileicolabel2,ui->fileicolabel3};
-
     acceptBtn[slotIndex]->setVisible(false);
     saveasBtn[slotIndex]->setVisible(false);
     refuseBtn[slotIndex]->setVisible(false);
-    bar[slotIndex]->setVisible(true);
     nameLabel[slotIndex]->setVisible(true);
     sizeLabel[slotIndex]->setVisible(true);
+    bar[slotIndex]->setVisible(true); // 只有点击接受后才显示进度条
     fileicolabel[slotIndex]->setVisible(true);
-
+    // 新增：初始化进度条
+    initAcceptProgress(slotIndex, info);
     checkForCompletion(msg_id);
-
     qDebug() << "handleAccept后状态: accepted=" << info.accepted
              << "end_received=" << info.end_received
              << "received_chunks=" << info.received_chunks
@@ -1063,35 +985,17 @@ void Widget::handleAccept(int slotIndex)
 //处理另存为按键
 void Widget::handleSaveAs(int slotIndex)
 {
-    // 获取当前槽位对应的msg_id
     int msg_id = slotMsgIds[slotIndex];
-    if (!recvFiles.contains(msg_id)) {
-        QMessageBox::warning(this, "另存为失败", QString("未找到msg_id: %1").arg(msg_id));
-        qWarning() << "handleSaveAs: 未找到msg_id" << msg_id;
-        return;
-    }
+    if (!recvFiles.contains(msg_id)) return;
     FileRecvInfo& info = recvFiles[msg_id];
-    // 弹出另存为对话框
     QString savePath = QFileDialog::getSaveFileName(this, "另存为", info.filename);
-    if (savePath.isEmpty()) {
-        QMessageBox::information(this, "另存为取消", "未选择保存路径");
-        qDebug() << "handleSaveAs: 用户取消另存为";
-        return;
-    }
+    if (savePath.isEmpty()) return;
     info.saveasPath = savePath;
     info.accepted = true;
-    // 如果之前已打开文件，先关闭
-    if (info.file) { info.file->close(); delete info.file; }
-    // 创建新文件
-    info.file = new QFile(savePath);
-    if (!info.file->open(QIODevice::WriteOnly)) {
-        QMessageBox::critical(this, "错误", "无法创建接收文件");
-        qWarning() << "handleSaveAs: 无法创建接收文件" << savePath;
-        delete info.file;
-        info.file = nullptr;
-        return;
-    }
-    // 更新UI，隐藏操作按钮，显示进度条
+    // 不再立即 close/rename，等 checkForCompletion
+    // if (info.file) info.file->close();
+    // QFile::rename(info.tempFilePath, savePath);
+    // UI更新，隐藏操作按钮，显示进度条
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
     QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
@@ -1099,7 +1003,6 @@ void Widget::handleSaveAs(int slotIndex)
     QPushButton* saveasBtn[3] = {ui->saveasButton1, ui->saveasButton2, ui->saveasButton3};
     QPushButton* refuseBtn[3] = {ui->refuseButton1, ui->refuseButton2, ui->refuseButton3};
     QLabel* fileicolabel[3] = {ui->fileicolabel1,ui->fileicolabel2,ui->fileicolabel3};
-
     acceptBtn[slotIndex]->setVisible(false);
     saveasBtn[slotIndex]->setVisible(false);
     refuseBtn[slotIndex]->setVisible(false);
@@ -1107,56 +1010,7 @@ void Widget::handleSaveAs(int slotIndex)
     sizeLabel[slotIndex]->setVisible(true);
     bar[slotIndex]->setVisible(true);
     fileicolabel[slotIndex]->setVisible(true);
-
-    // 处理缓存的文件块
-    if (!info.cached_chunks.isEmpty()) {
-        qDebug() << "处理缓存的文件块，数量:" << info.cached_chunks.size();
-        for (auto it = info.cached_chunks.begin(); it != info.cached_chunks.end(); ++it) {
-            quint32 chunk_index = it.key();
-            const QByteArray& chunk = it.value();
-
-            // 检查块索引是否有效
-            if (chunk_index >= info.chunk_count) {
-                qWarning() << "缓存的块索引无效:" << chunk_index << ">==" << info.chunk_count;
-                continue;
-            }
-
-            qint64 offset = qint64(chunk_index) * CHUNK_SIZE;
-            // 定位文件位置
-            if (!info.file->seek(offset)) {
-                qCritical() << "文件定位失败，位置:" << offset << "文件:" << savePath;
-                continue;
-            }
-
-            // 写入文件块
-            qint64 written = info.file->write(chunk);
-            if (written != chunk.size()) {
-                qCritical() << "文件写入失败，期望:" << chunk.size() << "实际:" << written;
-                continue;
-            }
-
-            // 更新接收状态
-            if (!info.received[chunk_index]) {
-                info.received[chunk_index] = true;
-                info.received_chunks++;
-                qDebug() << "成功写入缓存的文件块"
-                         << "chunk_index:" << chunk_index
-                         << "size:" << chunk.size()
-                         << "进度:" << info.received_chunks << "/" << info.chunk_count;
-            }
-        }
-
-        // 清空缓存
-        info.cached_chunks.clear();
-
-        // 更新进度条
-        int progress = int(double(info.received_chunks) / info.chunk_count * 100);
-        updateFileSlot(slotIndex, info.filename, info.filesize, progress);
-    }
-
-    // 检查是否完成
     checkForCompletion(msg_id);
-
     QMessageBox::information(this, "另存为", QString("文件将保存到: %1").arg(savePath));
     qDebug() << "handleSaveAs: 用户另存为" << savePath;
 }
@@ -1166,15 +1020,14 @@ void Widget::handleRefuse(int slotIndex)
     int msg_id = slotMsgIds[slotIndex];
     if (recvFiles.contains(msg_id)) {
         FileRecvInfo& info = recvFiles[msg_id];
-        // 清理缓存的文件块
-        info.cached_chunks.clear();
-        // 关闭并删除文件
         if (info.file) {
             info.file->close();
             delete info.file;
             info.file = nullptr;
         }
-        // 从接收文件列表中移除
+        if (!info.tempFilePath.isEmpty()) {
+            QFile::remove(info.tempFilePath);
+        }
         recvFiles.remove(msg_id);
     }
     clearFileSlot(slotIndex);
@@ -1194,7 +1047,10 @@ void Widget::checkForCompletion(quint32 msg_id)
             delete info.file;
             info.file = nullptr;
         }
-
+        // 完成后再重命名
+        if (!info.tempFilePath.isEmpty() && !info.saveasPath.isEmpty()) {
+            QFile::rename(info.tempFilePath, info.saveasPath);
+        }
         int slot = findSlotByMsgId(msg_id);
         if (slot != -1) {
             // 确保进度条是100%
@@ -1223,5 +1079,28 @@ QString Widget::formatFileSize(quint64 bytes)
         return QString::number(static_cast<double>(bytes) / kb, 'f', 2) + " KB";
     } else {
         return QString::number(bytes) + " B";
+    }
+}
+
+//处理ID分配
+void Widget::handleIdAssign(const PacketHeader& header)
+{
+    quint32 assignedId = qFromBigEndian(header.sender_id);
+    this->clientId = assignedId;
+    setWindowTitle(QString("Chat Client - My ID: %1").arg(this->clientId));
+    qDebug() << "Client ID has been assigned:" << this->clientId;
+}
+
+void Widget::initAcceptProgress(int slotIndex, FileRecvInfo& info)
+{
+    QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
+    if (info.received_chunks == info.chunk_count) {
+        // 所有分片已到达，直接100%
+        bar[slotIndex]->setValue(100);
+        info.acceptProgressInitialized = true;
+    } else {
+        // 还未全部到达，进度条从0开始
+        bar[slotIndex]->setValue(0);
+        info.acceptProgressInitialized = true;
     }
 }
