@@ -7,6 +7,11 @@
 #include <QtEndian>
 #include <QTimer>
 #include <QDebug>
+#include <boost/crc.hpp>
+
+// CRC32工具函数声明
+quint32 calculateHeaderCRC32(const PacketHeader& header, const QByteArray& data);
+bool verifyHeaderCRC32(const PacketHeader& header, const QByteArray& data);
 
 // 构造函数：初始化UI、TCP套接字和信号槽连接
 Widget::Widget(QWidget *parent)
@@ -160,8 +165,9 @@ void Widget::sendTextMessage(const QString& text)
     header.chunk_index = 0;
     header.chunk_count = qToBigEndian<quint32>(1);
     header.sender_id = qToBigEndian<quint32>(clientId);
-
-    // 尝试写入协议头
+    // 计算CRC32
+    header.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(header, data));
+    // 发送header+data
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&header), sizeof(header));
     if (headerWritten == -1) {
         // 写入失败，获取错误信息
@@ -193,7 +199,6 @@ void Widget::sendTextMessage(const QString& text)
         //考虑是否重发
         return;
     }
-    // 尝试写入数据部分
     qint64 dataWritten = socket->write(data);
     if (dataWritten == -1) {
         QString errorMsg = QString("发送数据失败: %1\n错误代码: %2")
@@ -269,7 +274,9 @@ void Widget::sendFile(const QString& path)
     startHeader.chunk_index = 0;
     startHeader.chunk_count = qToBigEndian<quint32>(chunk_count);
     startHeader.sender_id = qToBigEndian<quint32>(clientId);
-    // 尝试写入文件开始协议头
+    // 计算CRC32（header+文件名）
+    startHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(startHeader, fileName));
+    // 发送header+文件名
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&startHeader), sizeof(startHeader));
     if (headerWritten == -1) {
         // 写入失败，获取错误信息
@@ -377,6 +384,8 @@ void Widget::sendNextChunk(quint32 msg_id)
         endHeader.chunk_index = 0;
         endHeader.chunk_count = 0;
         endHeader.sender_id = qToBigEndian<quint32>(clientId);
+        // 计算CRC32（header本身）
+        endHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(endHeader));
         qint64 endHeaderWritten = socket->write(reinterpret_cast<const char*>(&endHeader), sizeof(endHeader));
         // 错误处理
         if (endHeaderWritten == -1) {
@@ -423,7 +432,9 @@ void Widget::sendNextChunk(quint32 msg_id)
     chunkHeader.chunk_index = qToBigEndian<quint32>(task.current_chunk);
     chunkHeader.chunk_count = qToBigEndian<quint32>(task.chunk_count);
     chunkHeader.sender_id = qToBigEndian<quint32>(clientId);
-    // 尝试写入块协议头
+    // 计算CRC32（header+chunk）
+    chunkHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(chunkHeader, chunk));
+    // 发送header+chunk
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&chunkHeader), sizeof(chunkHeader));
     // 错误处理 - 协议头写入
     if (headerWritten == -1) {
@@ -543,7 +554,9 @@ void Widget::resendCurrentChunk(quint32 msg_id)
     chunkHeader.chunk_index = qToBigEndian<quint32>(task.current_chunk);
     chunkHeader.chunk_count = qToBigEndian<quint32>(task.chunk_count);
     chunkHeader.sender_id = qToBigEndian<quint32>(clientId);
-    // 尝试写入块协议头
+    // 计算CRC32（header+chunk）
+    chunkHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(chunkHeader, chunk));
+    // 发送header+chunk
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&chunkHeader), sizeof(chunkHeader));
     // 错误处理 - 协议头写入
     if (headerWritten == -1) {
@@ -585,6 +598,10 @@ void Widget::resendCurrentChunk(quint32 msg_id)
 //处理ACK
 void Widget::handleAck(const PacketHeader& header)
 {
+    if (!verifyHeaderCRC32(header)) {
+        qCritical() << "[CRC32校验失败] ACK包被丢弃, msg_id:" << qFromBigEndian(header.msg_id);
+        return;
+    }
     quint32 msg_id = qFromBigEndian(header.msg_id);
     quint32 chunk_index = qFromBigEndian(header.chunk_index);
     if (!sendTasks.contains(msg_id)){
@@ -659,8 +676,10 @@ void Widget::handleTextMessage(const PacketHeader& header)
 {
     quint32 datalen = qFromBigEndian(header.datalen);
     QByteArray data = socket->read(datalen);
-    // 头部读取错误处理
-    // 检查数据长度
+    if (!verifyHeaderCRC32(header, data)) {
+        qCritical() << "[CRC32校验失败] 文本消息被丢弃, msg_id:" << qFromBigEndian(header.msg_id);
+        return;
+    }
     if (data.size() != datalen) {
         qCritical() << "文本消息数据读取失败: 期望" << datalen << "字节, 实际读取"
                     << data.size() << "字节";
@@ -679,6 +698,10 @@ void Widget::handleFileStart(const PacketHeader& header)
     quint64 filesize = qFromBigEndian(header.file_size);
     quint32 msg_id = qFromBigEndian(header.msg_id);
     QByteArray filenameData = socket->read(filename_len);
+    if (!verifyHeaderCRC32(header, filenameData)) {
+        qCritical() << "[CRC32校验失败] 文件开始包被丢弃, msg_id:" << msg_id;
+        return;
+    }
     if (filenameData.size() != filename_len) {
         qCritical() << "文件名数据读取失败: 期望" << filename_len << "字节, 实际读取"
                     << filenameData.size() << "字节";
@@ -712,6 +735,10 @@ void Widget::handleFileStart(const PacketHeader& header)
     if (slot != -1) {
         slotMsgIds[slot] = msg_id;
         updateFileSlot(slot, filename, filesize, 0);
+        if (slot < 0 || slot > 2) {
+            qWarning() << "updateFileSlot: invalid slot" << slot;
+            return;
+        }
         // 只显示文件名、大小和操作按钮，进度条保持隐藏
         QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
         QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
@@ -738,6 +765,10 @@ void Widget::handleFileChunk(const PacketHeader& header)
     quint32 chunk_index = qFromBigEndian(header.chunk_index);
     quint32 datalen = qFromBigEndian(header.datalen);
     QByteArray chunk = socket->read(datalen);
+    if (!verifyHeaderCRC32(header, chunk)) {
+        qCritical() << "[CRC32校验失败] 文件分片被丢弃, msg_id:" << msg_id << ", chunk_index:" << chunk_index;
+        return;
+    }
     if (chunk.size() != datalen) {
         QString errorMsg = QString("文件块数据读取不完整\n期望: %1 字节\n实际: %2 字节\n块索引: %3/%4")
                                .arg(datalen)
@@ -805,6 +836,10 @@ void Widget::handleFileChunk(const PacketHeader& header)
 void Widget::handleFileEnd(const PacketHeader& header)
 {
     quint32 msg_id = qFromBigEndian(header.msg_id);
+    if (!verifyHeaderCRC32(header)) {
+        qCritical() << "[CRC32校验失败] 文件结束包被丢弃, msg_id:" << msg_id;
+        return;
+    }
     if (!recvFiles.contains(msg_id)) {
         qWarning() << "文件结束块失败: 无效的消息ID" << msg_id;
         return;
@@ -831,7 +866,9 @@ void Widget::sendAck(quint32 msg_id, quint32 chunk_index)
     ack.chunk_index = qToBigEndian<quint32>(chunk_index);
     ack.chunk_count = 0;
     ack.sender_id = qToBigEndian<quint32>(clientId);
-    // 尝试发送 ACK 包
+    // 计算CRC32（header本身）
+    ack.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(ack));
+    // 发送ACK
     qint64 ackWritten = socket->write(reinterpret_cast<const char*>(&ack), sizeof(ack));
     // 错误处理
     if (ackWritten == -1) {
@@ -1103,4 +1140,39 @@ void Widget::initAcceptProgress(int slotIndex, FileRecvInfo& info)
         bar[slotIndex]->setValue(0);
         info.acceptProgressInitialized = true;
     }
+}
+
+// CRC32计算函数实现
+quint32 calculateHeaderCRC32(const PacketHeader& header, const QByteArray& data) {
+    boost::crc_32_type crc;
+    crc.process_bytes(&header, offsetof(PacketHeader, crc32));
+    if (!data.isEmpty()) {
+        crc.process_bytes(data.constData(), data.size());
+    }
+    return crc.checksum();
+}
+
+// CRC32校验函数实现
+bool verifyHeaderCRC32(const PacketHeader& header, const QByteArray& data) {
+    quint32 expectedCRC32 = qFromBigEndian(header.crc32);
+    quint32 calculatedCRC32 = calculateHeaderCRC32(header, data);
+    QString typeStr;
+    switch(header.msg_type) {
+    case MSG_TYPE_TEXT: typeStr = "TEXT"; break;
+    case MSG_TYPE_FILE_START: typeStr = "FILE_START"; break;
+    case MSG_TYPE_FILE_CHUNK: typeStr = "FILE_CHUNK"; break;
+    case MSG_TYPE_FILE_END: typeStr = "FILE_END"; break;
+    case MSG_TYPE_ACK: typeStr = "ACK"; break;
+    case MSG_TYPE_ID_ASSIGN: typeStr = "ID_ASSIGN"; break;
+    default: typeStr = QString::number(header.msg_type); break;
+    }
+    quint32 msg_id = qFromBigEndian(header.msg_id);
+    bool ok = (calculatedCRC32 == expectedCRC32);
+    qDebug().noquote() << QString("[CRC32校验] type:%1 msg_id:%2 收到:%3 计算:%4 结果:%5")
+                              .arg(typeStr,
+                                   QString::number(msg_id),  // 显式转换整数类型
+                                   QString::number(expectedCRC32, 16).rightJustified(8, '0'),
+                                   QString::number(calculatedCRC32, 16).rightJustified(8, '0'),
+                                   ok ? "成功" : "失败");
+    return ok;
 }

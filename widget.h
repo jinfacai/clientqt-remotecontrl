@@ -8,6 +8,7 @@
 #include <QVector>
 #include <QMap>
 #include <QDir>
+#include <boost/crc.hpp>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
@@ -33,8 +34,13 @@ struct PacketHeader {
     quint32 chunk_index;
     quint32 chunk_count;
     quint32 sender_id;
+    quint32 crc32;
 };
 #pragma pack(pop)
+
+// CRC32工具函数声明（放在类外！）
+quint32 calculateHeaderCRC32(const PacketHeader& header, const QByteArray& data = QByteArray());
+bool verifyHeaderCRC32(const PacketHeader& header, const QByteArray& data = QByteArray());
 
 struct FileRecvInfo {
     QString filename;
