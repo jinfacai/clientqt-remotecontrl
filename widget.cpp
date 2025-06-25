@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QDebug>
 #include <boost/crc.hpp>
+#include <QRegularExpression>
 
 // CRC32工具函数声明
 quint32 calculateHeaderCRC32(const PacketHeader& header, const QByteArray& data);
@@ -148,6 +149,7 @@ void Widget::onSendButtonClicked()
     }
     sendTextMessage(text);
     ui->clientTextEdit->clear();
+    // 只显示"我"
     ui->serveBrowser->append("[我] " + text);
 }
 
@@ -259,7 +261,25 @@ void Widget::sendFile(const QString& path)
         delete file;
         return;
     }
-    QByteArray fileName = QFileInfo(*file).fileName().toUtf8();
+
+    // 文件名合法性校验
+    QString safeFileName = QFileInfo(*file).fileName();
+    if (safeFileName.isEmpty() || safeFileName.length() > 100) {
+        QMessageBox::critical(this, "错误", "文件名为空或过长！");
+        file->close();
+        delete file;
+        return;
+    }
+
+    // 使用QRegularExpression进行校验
+    QRegularExpression invalidPattern("[\\\\/:*?\"<>|]");
+    QRegularExpressionMatch match = invalidPattern.match(safeFileName);
+    if (match.hasMatch()) {
+        QMessageBox::critical(this, "错误", "文件名包含非法字符！");
+        file->close();
+        delete file;
+        return;
+    }
     quint64 fileSize = file->size();
     quint32 msg_id = nextMsgId();
     quint32 chunk_count = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -268,14 +288,14 @@ void Widget::sendFile(const QString& path)
     startHeader.version = MY_PROTOCOOL_VERSION;
     startHeader.msg_type = MSG_TYPE_FILE_START;
     startHeader.datalen = 0;
-    startHeader.filename_len = qToBigEndian<quint32>(fileName.size());
+    startHeader.filename_len = qToBigEndian<quint32>(safeFileName.size());
     startHeader.file_size = qToBigEndian<quint64>(fileSize);
     startHeader.msg_id = qToBigEndian<quint32>(msg_id);
     startHeader.chunk_index = 0;
     startHeader.chunk_count = qToBigEndian<quint32>(chunk_count);
     startHeader.sender_id = qToBigEndian<quint32>(clientId);
     // 计算CRC32（header+文件名）
-    startHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(startHeader, fileName));
+    startHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(startHeader, safeFileName.toUtf8()));
     // 发送header+文件名
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&startHeader), sizeof(startHeader));
     if (headerWritten == -1) {
@@ -316,7 +336,7 @@ void Widget::sendFile(const QString& path)
         return;
     }
     // 尝试写入文件名
-    qint64 nameWritten = socket->write(fileName);
+    qint64 nameWritten = socket->write(safeFileName.toUtf8());
     if (nameWritten == -1) {
         QString errorMsg = QString("发送文件名失败: %1\n错误代码: %2")
                                .arg(socket->errorString())
@@ -337,10 +357,10 @@ void Widget::sendFile(const QString& path)
         return;
     }
     // 检查文件名是否完整写入
-    else if (nameWritten != fileName.size()) {
+    else if (nameWritten != safeFileName.size()) {
         QString errorMsg = QString("文件名未完整发送\n已发送: %1 字节/应发送: %2 字节")
                                .arg(nameWritten)
-                               .arg(fileName.size());
+                               .arg(safeFileName.size());
 
         QMessageBox::warning(this, "文件传输警告", errorMsg);
         qWarning() << "Incomplete file name write:" << errorMsg;
@@ -358,7 +378,7 @@ void Widget::sendFile(const QString& path)
     task.current_chunk = 0;
     task.acked = QVector<bool>(chunk_count, false);
     task.timer = nullptr;
-    task.filename = fileName;
+    task.filename = safeFileName.toUtf8();
     task.filesize = fileSize;
     sendTasks[msg_id] = task;
     sendNextChunk(msg_id);
@@ -410,8 +430,8 @@ void Widget::sendNextChunk(quint32 msg_id)
         if (task.timer) { task.timer->stop(); delete task.timer; }
         sendTasks.remove(msg_id);
 
-        //ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg(QString::fromUtf8(task.filename)));
-        ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg((task.filename)));
+        // 只显示"我"
+        ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg(task.filename));
         ui->fileBrowser->clear();
         return;
     }
@@ -687,7 +707,10 @@ void Widget::handleTextMessage(const PacketHeader& header)
         return;
     }
     QString text = QString::fromUtf8(data);
-    ui->serveBrowser->append("[服务器] " + text);
+    quint32 sender_id = qFromBigEndian(header.sender_id);
+    // 无论是谁发的消息，都显示[客户端X]
+    QString senderText = QString("[客户端%1] ").arg(sender_id);
+    ui->serveBrowser->append(senderText + text);
     sendAck(qFromBigEndian(header.msg_id), 0);
 }
 
@@ -754,6 +777,11 @@ void Widget::handleFileStart(const PacketHeader& header)
         saveasBtn[slot]->setVisible(true);
         refuseBtn[slot]->setVisible(true);
         fileicolabel[slot]->setVisible(true);
+
+        // 显示文件接收信息
+        quint32 sender_id = qFromBigEndian(header.sender_id);
+        QString senderText = QString("[客户端%1] ").arg(sender_id);
+        ui->serveBrowser->append(QString("%1发送文件：%2").arg(senderText, filename));
     }
     sendAck(msg_id, 0);
 }
@@ -926,7 +954,7 @@ void Widget::updateFileSlot(int slot, const QString& filename, quint64 filesize,
     QLabel* nameLabel[3] = {ui->filenamelabel1, ui->filenamelabel2, ui->filenamelabel3};
     QLabel* sizeLabel[3] = {ui->filesizelabel1, ui->filesizelabel2, ui->filesizelabel3};
     QProgressBar* bar[3] = {ui->progressBar1, ui->progressBar2, ui->progressBar3};
-    nameLabel[slot]->setText(filename);
+    nameLabel[slot]->setText(elideFileName(filename, 20));
     sizeLabel[slot]->setText(QString("大小：%1").arg(formatFileSize(filesize)));
     bar[slot]->setValue(progress);
     nameLabel[slot]->setVisible(true);
@@ -1175,4 +1203,12 @@ bool verifyHeaderCRC32(const PacketHeader& header, const QByteArray& data) {
                                    QString::number(calculatedCRC32, 16).rightJustified(8, '0'),
                                    ok ? "成功" : "失败");
     return ok;
+}
+
+// 文件名缩略显示
+QString Widget::elideFileName(const QString& name, int maxLen) {
+    if (name.length() <= maxLen) return name;
+    int left = maxLen / 2;
+    int right = maxLen - left - 3; // 3 for ...
+    return name.left(left) + "..." + name.right(right);
 }

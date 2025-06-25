@@ -128,6 +128,7 @@ private:
     quint32 lastMsgId = 0;
 
     void initAcceptProgress(int slotIndex, FileRecvInfo& info);
+    QString elideFileName(const QString& name, int maxLen = 20);
 
 private:
     Ui::Widget *ui;
