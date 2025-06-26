@@ -150,7 +150,10 @@ void Widget::onSendButtonClicked()
     sendTextMessage(text);
     ui->clientTextEdit->clear();
     // 只显示"我"
-    ui->serveBrowser->append("[我] " + text);
+    //ui->serveBrowser->append("[我] " + text);
+    //添加时间显示
+    QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+    ui->serveBrowser->append(QString("[%1]\n[我] %2").arg(currentTime, text));
 }
 
 // 发送文本消息
@@ -431,7 +434,9 @@ void Widget::sendNextChunk(quint32 msg_id)
         sendTasks.remove(msg_id);
 
         // 只显示"我"
-        ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg(task.filename));
+        QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+        //ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg(task.filename));
+        ui->serveBrowser->append(QString("[%1]\n[我] 发送了文件：%2").arg(currentTime, task.filename));
         ui->fileBrowser->clear();
         return;
     }
@@ -709,8 +714,12 @@ void Widget::handleTextMessage(const PacketHeader& header)
     QString text = QString::fromUtf8(data);
     quint32 sender_id = qFromBigEndian(header.sender_id);
     // 无论是谁发的消息，都显示[客户端X]
+    //QString senderText = QString("[客户端%1] ").arg(sender_id);
+    //QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+    //ui->serveBrowser->append(senderText + text);
+    QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
     QString senderText = QString("[客户端%1] ").arg(sender_id);
-    ui->serveBrowser->append(senderText + text);
+    ui->serveBrowser->append(QString("[%1]\n%2%3").arg(currentTime, senderText, text));
     sendAck(qFromBigEndian(header.msg_id), 0);
 }
 
@@ -779,9 +788,13 @@ void Widget::handleFileStart(const PacketHeader& header)
         fileicolabel[slot]->setVisible(true);
 
         // 显示文件接收信息
+        //quint32 sender_id = qFromBigEndian(header.sender_id);
+        //QString senderText = QString("[客户端%1] ").arg(sender_id);
+        //ui->serveBrowser->append(QString("%1发送文件：%2").arg(senderText, filename));
         quint32 sender_id = qFromBigEndian(header.sender_id);
+        QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         QString senderText = QString("[客户端%1] ").arg(sender_id);
-        ui->serveBrowser->append(QString("%1发送文件：%2").arg(senderText, filename));
+        ui->serveBrowser->append(QString("[%1]\n%2发送文件：%3").arg(currentTime, senderText, filename));
     }
     sendAck(msg_id, 0);
 }
