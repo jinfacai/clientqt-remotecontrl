@@ -69,6 +69,22 @@ struct FileSendTask {
     FileSendTask() : file(nullptr), msg_id(0), chunk_count(0), current_chunk(0), timer(nullptr), filesize(0) {}
 };
 
+struct TextSendTask {
+    QString text;
+    quint32 msg_id;
+    QTimer* timer;
+    int retryCount;
+    TextSendTask() : msg_id(0), timer(nullptr), retryCount(0) {}
+};
+
+struct FileNameSendTask {
+    QString filename;
+    quint32 msg_id;
+    QTimer* timer;
+    int retryCount;
+    FileNameSendTask() : msg_id(0), timer(nullptr), retryCount(0) {}
+};
+
 class Widget : public QWidget
 {
     Q_OBJECT
@@ -137,8 +153,12 @@ private:
     QMap<quint32, FileRecvInfo> recvFiles; // msg_id -> FileRecvInfo
     QVector<quint32> slotMsgIds; // 槽位对应的msg_id
     QMap<quint32, FileSendTask> sendTasks;
+    QMap<quint32, TextSendTask> textSendTasks;
+    QMap<quint32, FileNameSendTask> fileNameSendTasks;
     void sendNextChunk(quint32 msg_id);
     void resendCurrentChunk(quint32 msg_id);
+    void resendTextMessage(quint32 msg_id);
+    void resendFileName(quint32 msg_id);
 };
 
 #endif // WIDGET_H

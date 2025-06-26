@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QDebug>
 #include <boost/crc.hpp>
+#include <QDateTime>
 #include <QRegularExpression>
 
 // CRC32工具函数声明
@@ -149,9 +150,7 @@ void Widget::onSendButtonClicked()
     }
     sendTextMessage(text);
     ui->clientTextEdit->clear();
-    // 只显示"我"
-    //ui->serveBrowser->append("[我] " + text);
-    //添加时间显示
+    // 添加时间戳显示
     QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
     ui->serveBrowser->append(QString("[%1]\n[我] %2").arg(currentTime, text));
 }
@@ -170,67 +169,67 @@ void Widget::sendTextMessage(const QString& text)
     header.chunk_index = 0;
     header.chunk_count = qToBigEndian<quint32>(1);
     header.sender_id = qToBigEndian<quint32>(clientId);
-    // 计算CRC32
     header.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(header, data));
-    // 发送header+data
+
+    quint32 msg_id = qFromBigEndian(header.msg_id);
+
+    // 检查header写入
     qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&header), sizeof(header));
     if (headerWritten == -1) {
-        // 写入失败，获取错误信息
-        QString errorMsg = QString("发送协议头失败: %1\n错误代码: %2")
+        QString errorMsg = QString("发送文本消息协议头失败: %1\n错误代码: %2")
                                .arg(socket->errorString())
                                .arg(socket->error());
-
-        // 显示错误对话框
         QMessageBox::critical(this, "网络错误", errorMsg);
-
-        // 记录错误日志
-        qCritical() << "Header write error:" << errorMsg;
-
-        // 关闭连接并清理资源
-        socket->disconnectFromHost();
-        if (socket->state() != QAbstractSocket::UnconnectedState) {
-            socket->waitForDisconnected(1000);
-        }
+        qCritical() << "Text header write error:" << errorMsg;
         return;
     }
-    // 检查是否完整写入
     else if (headerWritten != sizeof(header)) {
-        QString errorMsg = QString("协议头未完整发送\n已发送: %1 字节/应发送: %2 字节")
+        QString errorMsg = QString("文本消息协议头写入不完整\n已发送: %1 字节/应发送: %2 字节\n将在100ms后重试")
                                .arg(headerWritten)
                                .arg(sizeof(header));
-
         QMessageBox::warning(this, "网络警告", errorMsg);
-        qWarning() << "Incomplete header write:" << errorMsg;
-        //考虑是否重发
+        qWarning() << "Incomplete text header write:" << errorMsg;
+        // 立即重发：延迟100ms后重新发送整个包
+        QTimer::singleShot(100, this, [this, text]() {
+            sendTextMessage(text);
+        });
         return;
     }
+
+    // 检查data写入
     qint64 dataWritten = socket->write(data);
     if (dataWritten == -1) {
-        QString errorMsg = QString("发送数据失败: %1\n错误代码: %2")
+        QString errorMsg = QString("发送文本消息数据失败: %1\n错误代码: %2")
                                .arg(socket->errorString())
                                .arg(socket->error());
-
         QMessageBox::critical(this, "网络错误", errorMsg);
-        qCritical() << "Data write error:" << errorMsg;
-
-        socket->disconnectFromHost();
-        if (socket->state() != QAbstractSocket::UnconnectedState) {
-            socket->waitForDisconnected(1000);
-        }
+        qCritical() << "Text data write error:" << errorMsg;
         return;
     }
-    // 检查数据是否完整写入
     else if (dataWritten != data.size()) {
-        QString errorMsg = QString("数据未完整发送\n已发送: %1 字节/应发送: %2 字节")
+        QString errorMsg = QString("文本消息数据写入不完整\n已发送: %1 字节/应发送: %2 字节\n将在100ms后重试")
                                .arg(dataWritten)
                                .arg(data.size());
-
         QMessageBox::warning(this, "网络警告", errorMsg);
-        qWarning() << "Incomplete data write:" << errorMsg;
-
-        // 对于未完整发送的情况，可以尝试重发或记录状态
-
+        qWarning() << "Incomplete text data write:" << errorMsg;
+        // 立即重发：延迟100ms后重新发送整个包
+        QTimer::singleShot(100, this, [this, text]() {
+            sendTextMessage(text);
+        });
+        return;
     }
+
+    // 写入完整，创建TextSendTask
+    TextSendTask task;
+    task.text = text;
+    task.msg_id = msg_id;
+    task.retryCount = 0;
+    task.timer = new QTimer(this);
+    connect(task.timer, &QTimer::timeout, this, [this, msg_id]() {
+        resendTextMessage(msg_id);
+    });
+    task.timer->start(3000); // 3秒重发
+    textSendTasks[msg_id] = task;
 }
 
 // 选择文件
@@ -264,7 +263,6 @@ void Widget::sendFile(const QString& path)
         delete file;
         return;
     }
-
     // 文件名合法性校验
     QString safeFileName = QFileInfo(*file).fileName();
     if (safeFileName.isEmpty() || safeFileName.length() > 100) {
@@ -326,7 +324,7 @@ void Widget::sendFile(const QString& path)
     }
     // 检查是否完整写入
     else if (headerWritten != sizeof(startHeader)) {
-        QString errorMsg = QString("文件开始协议头未完整发送\n已发送: %1 字节/应发送: %2 字节")
+        QString errorMsg = QString("文件开始协议头写入不完整\n已发送: %1 字节/应发送: %2 字节\n将在100ms后重试")
                                .arg(headerWritten)
                                .arg(sizeof(startHeader));
 
@@ -336,6 +334,11 @@ void Widget::sendFile(const QString& path)
         // 清理文件资源
         file->close();
         delete file;
+
+        // 立即重发：延迟100ms后重新发送整个文件
+        QTimer::singleShot(100, this, [this, path]() {
+            sendFile(path);
+        });
         return;
     }
     // 尝试写入文件名
@@ -361,7 +364,7 @@ void Widget::sendFile(const QString& path)
     }
     // 检查文件名是否完整写入
     else if (nameWritten != safeFileName.size()) {
-        QString errorMsg = QString("文件名未完整发送\n已发送: %1 字节/应发送: %2 字节")
+        QString errorMsg = QString("文件名写入不完整\n已发送: %1 字节/应发送: %2 字节\n将在100ms后重试")
                                .arg(nameWritten)
                                .arg(safeFileName.size());
 
@@ -371,8 +374,24 @@ void Widget::sendFile(const QString& path)
         // 清理文件资源
         file->close();
         delete file;
+
+        // 立即重发：延迟100ms后重新发送整个文件
+        QTimer::singleShot(100, this, [this, path]() {
+            sendFile(path);
+        });
         return;
     }
+    // 新增：创建FileNameSendTask
+    FileNameSendTask fnTask;
+    fnTask.filename = safeFileName;
+    fnTask.msg_id = msg_id;
+    fnTask.retryCount = 0;
+    fnTask.timer = new QTimer(this);
+    connect(fnTask.timer, &QTimer::timeout, this, [this, msg_id]() {
+        resendFileName(msg_id);
+    });
+    fnTask.timer->start(3000);
+    fileNameSendTasks[msg_id] = fnTask;
     // 初始化发送任务
     FileSendTask task;
     task.file = file;
@@ -430,12 +449,14 @@ void Widget::sendNextChunk(quint32 msg_id)
         }
         task.file->close();
         delete task.file;
-        if (task.timer) { task.timer->stop(); delete task.timer; }
+        if (task.timer) {
+            task.timer->stop();
+            delete task.timer;
+        }
         sendTasks.remove(msg_id);
 
-        // 只显示"我"
+        // 添加时间戳显示
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
-        //ui->serveBrowser->append(QString("[我] 发送了文件：%1").arg(task.filename));
         ui->serveBrowser->append(QString("[%1]\n[我] 发送了文件：%2").arg(currentTime, task.filename));
         ui->fileBrowser->clear();
         return;
@@ -629,16 +650,28 @@ void Widget::handleAck(const PacketHeader& header)
     }
     quint32 msg_id = qFromBigEndian(header.msg_id);
     quint32 chunk_index = qFromBigEndian(header.chunk_index);
-    if (!sendTasks.contains(msg_id)){
-        qWarning() << "ACK失败: 无效的消息ID" << msg_id;
-        return;
+
+    // 文本ACK
+    if (textSendTasks.contains(msg_id)) {
+        textSendTasks[msg_id].timer->stop();
+        delete textSendTasks[msg_id].timer;
+        textSendTasks.remove(msg_id);
     }
-    FileSendTask& task = sendTasks[msg_id];
-    if (chunk_index < task.acked.size()) task.acked[chunk_index] = true;
-    if (chunk_index == task.current_chunk) {
-        if (task.timer) task.timer->stop();
-        task.current_chunk++;
-        sendNextChunk(msg_id);
+    // 文件名ACK
+    if (fileNameSendTasks.contains(msg_id) && chunk_index == 0) {
+        fileNameSendTasks[msg_id].timer->stop();
+        delete fileNameSendTasks[msg_id].timer;
+        fileNameSendTasks.remove(msg_id);
+    }
+    // 文件块ACK
+    if (sendTasks.contains(msg_id)) {
+        FileSendTask& task = sendTasks[msg_id];
+        if (chunk_index < task.acked.size()) task.acked[chunk_index] = true;
+        if (chunk_index == task.current_chunk) {
+            if (task.timer) task.timer->stop();
+            task.current_chunk++;
+            sendNextChunk(msg_id);
+        }
     }
 }
 
@@ -713,10 +746,7 @@ void Widget::handleTextMessage(const PacketHeader& header)
     }
     QString text = QString::fromUtf8(data);
     quint32 sender_id = qFromBigEndian(header.sender_id);
-    // 无论是谁发的消息，都显示[客户端X]
-    //QString senderText = QString("[客户端%1] ").arg(sender_id);
-    //QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
-    //ui->serveBrowser->append(senderText + text);
+    // 添加时间戳显示
     QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
     QString senderText = QString("[客户端%1] ").arg(sender_id);
     ui->serveBrowser->append(QString("[%1]\n%2%3").arg(currentTime, senderText, text));
@@ -788,9 +818,6 @@ void Widget::handleFileStart(const PacketHeader& header)
         fileicolabel[slot]->setVisible(true);
 
         // 显示文件接收信息
-        //quint32 sender_id = qFromBigEndian(header.sender_id);
-        //QString senderText = QString("[客户端%1] ").arg(sender_id);
-        //ui->serveBrowser->append(QString("%1发送文件：%2").arg(senderText, filename));
         quint32 sender_id = qFromBigEndian(header.sender_id);
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         QString senderText = QString("[客户端%1] ").arg(sender_id);
@@ -1224,4 +1251,60 @@ QString Widget::elideFileName(const QString& name, int maxLen) {
     int left = maxLen / 2;
     int right = maxLen - left - 3; // 3 for ...
     return name.left(left) + "..." + name.right(right);
+}
+
+void Widget::resendTextMessage(quint32 msg_id)
+{
+    if (!textSendTasks.contains(msg_id)) return;
+    TextSendTask& task = textSendTasks[msg_id];
+    if (++task.retryCount > 5) { // 最多重试5次
+        task.timer->stop();
+        delete task.timer;
+        textSendTasks.remove(msg_id);
+        QMessageBox::warning(this, "文本重传失败", "文本消息多次重传未成功，已放弃。");
+        return;
+    }
+    QByteArray data = task.text.toUtf8();
+    PacketHeader header = {};
+    header.version = MY_PROTOCOOL_VERSION;
+    header.msg_type = MSG_TYPE_TEXT;
+    header.datalen = qToBigEndian<quint32>(data.size());
+    header.filename_len = 0;
+    header.file_size = 0;
+    header.msg_id = qToBigEndian<quint32>(msg_id);
+    header.chunk_index = 0;
+    header.chunk_count = qToBigEndian<quint32>(1);
+    header.sender_id = qToBigEndian<quint32>(clientId);
+    header.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(header, data));
+    socket->write(reinterpret_cast<const char*>(&header), sizeof(header));
+    socket->write(data);
+}
+
+void Widget::resendFileName(quint32 msg_id)
+{
+    if (!fileNameSendTasks.contains(msg_id)) return;
+    FileNameSendTask& task = fileNameSendTasks[msg_id];
+    if (++task.retryCount > 5) {
+        task.timer->stop();
+        delete task.timer;
+        fileNameSendTasks.remove(msg_id);
+        QMessageBox::warning(this, "文件名重传失败", "文件名多次重传未成功，已放弃。");
+        return;
+    }
+    QByteArray filenameData = task.filename.toUtf8();
+    if (!sendTasks.contains(msg_id)) return;
+    FileSendTask& fileTask = sendTasks[msg_id];
+    PacketHeader startHeader = {};
+    startHeader.version = MY_PROTOCOOL_VERSION;
+    startHeader.msg_type = MSG_TYPE_FILE_START;
+    startHeader.datalen = 0;
+    startHeader.filename_len = qToBigEndian<quint32>(filenameData.size());
+    startHeader.file_size = qToBigEndian<quint64>(fileTask.filesize);
+    startHeader.msg_id = qToBigEndian<quint32>(msg_id);
+    startHeader.chunk_index = 0;
+    startHeader.chunk_count = qToBigEndian<quint32>(fileTask.chunk_count);
+    startHeader.sender_id = qToBigEndian<quint32>(clientId);
+    startHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(startHeader, filenameData));
+    socket->write(reinterpret_cast<const char*>(&startHeader), sizeof(startHeader));
+    socket->write(filenameData);
 }
