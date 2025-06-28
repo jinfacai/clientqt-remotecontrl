@@ -587,9 +587,28 @@ void Widget::resendCurrentChunk(quint32 msg_id)
         qWarning() << "重传失败: 无效的消息ID" << msg_id;
         return;
     }
+
     FileSendTask& task = sendTasks[msg_id];
-    task.file->seek(task.current_chunk * CHUNK_SIZE);
+
+    // 检查文件有效性
+    if (!task.file || !task.file->isOpen()) {
+        qCritical() << "重传失败: 文件已关闭或无效";
+        return;
+    }
+
+    // 检查文件定位
+    if (!task.file->seek(task.current_chunk * CHUNK_SIZE)) {
+        qCritical() << "重传失败: 无法定位到文件位置";
+        return;
+    }
+
+    // 读取文件块
     QByteArray chunk = task.file->read(CHUNK_SIZE);
+    if (chunk.isEmpty() && task.current_chunk * CHUNK_SIZE < task.filesize) {
+        qCritical() << "重传失败: 无法读取文件块";
+        return;
+    }
+
     PacketHeader chunkHeader = {};
     chunkHeader.version = MY_PROTOCOOL_VERSION;
     chunkHeader.msg_type = MSG_TYPE_FILE_CHUNK;
@@ -600,45 +619,37 @@ void Widget::resendCurrentChunk(quint32 msg_id)
     chunkHeader.chunk_index = qToBigEndian<quint32>(task.current_chunk);
     chunkHeader.chunk_count = qToBigEndian<quint32>(task.chunk_count);
     chunkHeader.sender_id = qToBigEndian<quint32>(clientId);
-    // 计算CRC32（header+chunk）
     chunkHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(chunkHeader, chunk));
-    // 发送header+chunk
-    qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&chunkHeader), sizeof(chunkHeader));
-    // 错误处理 - 协议头写入
-    if (headerWritten == -1) {
-        QString errorMsg = QString("重传文件块协议头失败: %1\n错误代码: %2")
-                               .arg(socket->errorString())
-                               .arg(socket->error());
 
-        qWarning() << "Retry chunk header write error:" << errorMsg;
+    // 检查header写入完整性
+    qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&chunkHeader), sizeof(chunkHeader));
+    if (headerWritten == -1) {
+        qWarning() << "重传文件块协议头失败:" << socket->errorString();
+        if (task.timer) task.timer->start(3000); // 3秒后重试
+        return;
     }
     else if (headerWritten != sizeof(chunkHeader)) {
-        QString errorMsg = QString("重传文件块协议头未完整发送\n已发送: %1 字节/应发送: %2 字节")
-                               .arg(headerWritten)
-                               .arg(sizeof(chunkHeader));
-
-        qWarning() << "Incomplete retry chunk header write:" << errorMsg;
+        qWarning() << "重传文件块协议头写入不完整:" << headerWritten << "/" << sizeof(chunkHeader);
+        if (task.timer) task.timer->start(100); // 100ms后快速重试
+        return;
     }
-    // 尝试写入块数据
-    qint64 chunkWritten = socket->write(chunk);
-    // 错误处理 - 块数据写入
-    if (chunkWritten == -1) {
-        QString errorMsg = QString("重传文件块数据失败: %1\n错误代码: %2")
-                               .arg(socket->errorString())
-                               .arg(socket->error());
 
-        qWarning() << "Retry chunk data write error:" << errorMsg;
+    // 检查chunk数据写入完整性
+    qint64 chunkWritten = socket->write(chunk);
+    if (chunkWritten == -1) {
+        qWarning() << "重传文件块数据失败:" << socket->errorString();
+        if (task.timer) task.timer->start(3000); // 3秒后重试
+        return;
     }
     else if (chunkWritten != chunk.size()) {
-        QString errorMsg = QString("重传文件块数据未完整发送\n已发送: %1 字节/应发送: %2 字节")
-                               .arg(chunkWritten)
-                               .arg(chunk.size());
-
-        qWarning() << "Incomplete retry chunk data write:" << errorMsg;
+        qWarning() << "重传文件块数据写入不完整:" << chunkWritten << "/" << chunk.size();
+        if (task.timer) task.timer->start(100); // 100ms后快速重试
+        return;
     }
 
-    // 重新启动定时器
-    if (task.timer) task.timer->start(3000);
+    // 发送成功，等待ACK
+    qDebug() << "重传文件块成功，等待ACK，msg_id:" << msg_id << "chunk:" << task.current_chunk;
+    if (task.timer) task.timer->start(3000); // 3秒超时
 }
 
 //处理ACK
@@ -735,7 +746,12 @@ void Widget::handleTextMessage(const PacketHeader& header)
     quint32 datalen = qFromBigEndian(header.datalen);
     QByteArray data = socket->read(datalen);
     if (!verifyHeaderCRC32(header, data)) {
-        qCritical() << "[CRC32校验失败] 文本消息被丢弃, msg_id:" << qFromBigEndian(header.msg_id);
+        quint32 msg_id = qFromBigEndian(header.msg_id);
+        quint32 expectedCRC32 = qFromBigEndian(header.crc32);
+        quint32 calculatedCRC32 = calculateHeaderCRC32(header, data);
+        qCritical() << "[CRC32校验失败] 文本消息被丢弃, msg_id:" << msg_id
+                    << "期望CRC32: 0x" << QString::number(expectedCRC32, 16).rightJustified(8, '0')
+                    << "计算CRC32: 0x" << QString::number(calculatedCRC32, 16).rightJustified(8, '0');
         return;
     }
     if (data.size() != datalen) {
@@ -834,7 +850,12 @@ void Widget::handleFileChunk(const PacketHeader& header)
     quint32 datalen = qFromBigEndian(header.datalen);
     QByteArray chunk = socket->read(datalen);
     if (!verifyHeaderCRC32(header, chunk)) {
-        qCritical() << "[CRC32校验失败] 文件分片被丢弃, msg_id:" << msg_id << ", chunk_index:" << chunk_index;
+        quint32 expectedCRC32 = qFromBigEndian(header.crc32);
+        quint32 calculatedCRC32 = calculateHeaderCRC32(header, chunk);
+        qCritical() << "[CRC32校验失败] 文件分片被丢弃, msg_id:" << msg_id
+                    << "chunk_index:" << chunk_index
+                    << "期望CRC32: 0x" << QString::number(expectedCRC32, 16).rightJustified(8, '0')
+                    << "计算CRC32: 0x" << QString::number(calculatedCRC32, 16).rightJustified(8, '0');
         return;
     }
     if (chunk.size() != datalen) {
@@ -1264,6 +1285,7 @@ void Widget::resendTextMessage(quint32 msg_id)
         QMessageBox::warning(this, "文本重传失败", "文本消息多次重传未成功，已放弃。");
         return;
     }
+
     QByteArray data = task.text.toUtf8();
     PacketHeader header = {};
     header.version = MY_PROTOCOOL_VERSION;
@@ -1276,8 +1298,36 @@ void Widget::resendTextMessage(quint32 msg_id)
     header.chunk_count = qToBigEndian<quint32>(1);
     header.sender_id = qToBigEndian<quint32>(clientId);
     header.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(header, data));
-    socket->write(reinterpret_cast<const char*>(&header), sizeof(header));
-    socket->write(data);
+
+    // 检查header写入完整性
+    qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&header), sizeof(header));
+    if (headerWritten == -1) {
+        qWarning() << "重传文本消息协议头失败:" << socket->errorString();
+        task.timer->start(3000); // 3秒后重试
+        return;
+    }
+    else if (headerWritten != sizeof(header)) {
+        qWarning() << "重传文本消息协议头写入不完整:" << headerWritten << "/" << sizeof(header);
+        task.timer->start(100); // 100ms后快速重试
+        return;
+    }
+
+    // 检查data写入完整性
+    qint64 dataWritten = socket->write(data);
+    if (dataWritten == -1) {
+        qWarning() << "重传文本消息数据失败:" << socket->errorString();
+        task.timer->start(3000); // 3秒后重试
+        return;
+    }
+    else if (dataWritten != data.size()) {
+        qWarning() << "重传文本消息数据写入不完整:" << dataWritten << "/" << data.size();
+        task.timer->start(100); // 100ms后快速重试
+        return;
+    }
+
+    // 发送成功，等待ACK
+    qDebug() << "重传文本消息成功，等待ACK，msg_id:" << msg_id << "重试次数:" << task.retryCount;
+    task.timer->start(3000); // 3秒超时
 }
 
 void Widget::resendFileName(quint32 msg_id)
@@ -1291,6 +1341,7 @@ void Widget::resendFileName(quint32 msg_id)
         QMessageBox::warning(this, "文件名重传失败", "文件名多次重传未成功，已放弃。");
         return;
     }
+
     QByteArray filenameData = task.filename.toUtf8();
     if (!sendTasks.contains(msg_id)) return;
     FileSendTask& fileTask = sendTasks[msg_id];
@@ -1305,6 +1356,34 @@ void Widget::resendFileName(quint32 msg_id)
     startHeader.chunk_count = qToBigEndian<quint32>(fileTask.chunk_count);
     startHeader.sender_id = qToBigEndian<quint32>(clientId);
     startHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(startHeader, filenameData));
-    socket->write(reinterpret_cast<const char*>(&startHeader), sizeof(startHeader));
-    socket->write(filenameData);
+
+    // 检查header写入完整性
+    qint64 headerWritten = socket->write(reinterpret_cast<const char*>(&startHeader), sizeof(startHeader));
+    if (headerWritten == -1) {
+        qWarning() << "重传文件名协议头失败:" << socket->errorString();
+        task.timer->start(3000); // 3秒后重试
+        return;
+    }
+    else if (headerWritten != sizeof(startHeader)) {
+        qWarning() << "重传文件名协议头写入不完整:" << headerWritten << "/" << sizeof(startHeader);
+        task.timer->start(100); // 100ms后快速重试
+        return;
+    }
+
+    // 检查文件名数据写入完整性
+    qint64 nameWritten = socket->write(filenameData);
+    if (nameWritten == -1) {
+        qWarning() << "重传文件名数据失败:" << socket->errorString();
+        task.timer->start(3000); // 3秒后重试
+        return;
+    }
+    else if (nameWritten != filenameData.size()) {
+        qWarning() << "重传文件名数据写入不完整:" << nameWritten << "/" << filenameData.size();
+        task.timer->start(100); // 100ms后快速重试
+        return;
+    }
+
+    // 发送成功，等待ACK
+    qDebug() << "重传文件名成功，等待ACK，msg_id:" << msg_id << "重试次数:" << task.retryCount;
+    task.timer->start(3000); // 3秒超时
 }
