@@ -14,13 +14,14 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
 QT_END_NAMESPACE
 
-#define MY_PROTOCOOL_VERSION 1
+#define MY_PROTOCOL_VERSION 1
 #define MSG_TYPE_TEXT 1
 #define MSG_TYPE_FILE_START 6
 #define MSG_TYPE_FILE_CHUNK 5
 #define MSG_TYPE_FILE_END 7
 #define MSG_TYPE_ACK 3
 #define MSG_TYPE_ID_ASSIGN 8
+#define MSG_TYPE_REFUSE 9
 #define CHUNK_SIZE 32768
 
 #pragma pack(push, 1)

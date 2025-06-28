@@ -160,7 +160,7 @@ void Widget::sendTextMessage(const QString& text)
 {
     QByteArray data = text.toUtf8();
     PacketHeader header = {};
-    header.version = MY_PROTOCOOL_VERSION;
+    header.version = MY_PROTOCOL_VERSION;
     header.msg_type = MSG_TYPE_TEXT;
     header.datalen = qToBigEndian<quint32>(data.size());
     header.filename_len = 0;
@@ -251,6 +251,7 @@ void Widget::serveFile()
         QMessageBox::information(this, "提示", "请先选择文件");
         return;
     }
+    ui->fileBrowser->clear();
     sendFile(selectedFilePath);
 }
 
@@ -286,7 +287,7 @@ void Widget::sendFile(const QString& path)
     quint32 chunk_count = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
     // 发送文件开始
     PacketHeader startHeader = {};
-    startHeader.version = MY_PROTOCOOL_VERSION;
+    startHeader.version = MY_PROTOCOL_VERSION;
     startHeader.msg_type = MSG_TYPE_FILE_START;
     startHeader.datalen = 0;
     startHeader.filename_len = qToBigEndian<quint32>(safeFileName.size());
@@ -417,7 +418,7 @@ void Widget::sendNextChunk(quint32 msg_id)
     if (task.current_chunk >= task.chunk_count) {
         // 文件结束
         PacketHeader endHeader = {};
-        endHeader.version = MY_PROTOCOOL_VERSION;
+        endHeader.version = MY_PROTOCOL_VERSION;
         endHeader.msg_type = MSG_TYPE_FILE_END;
         endHeader.datalen = 0;
         endHeader.filename_len = 0;
@@ -426,26 +427,10 @@ void Widget::sendNextChunk(quint32 msg_id)
         endHeader.chunk_index = 0;
         endHeader.chunk_count = 0;
         endHeader.sender_id = qToBigEndian<quint32>(clientId);
-        // 计算CRC32（header本身）
         endHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(endHeader));
         qint64 endHeaderWritten = socket->write(reinterpret_cast<const char*>(&endHeader), sizeof(endHeader));
-        // 错误处理
-        if (endHeaderWritten == -1) {
-            QString errorMsg = QString("发送文件结束协议头失败: %1\n错误代码: %2")
-                                   .arg(socket->errorString())
-                                   .arg(socket->error());
-
-            QMessageBox::critical(this, "文件传输错误", errorMsg);
-            qCritical() << "File end header write error:" << errorMsg;
-        }
-        else if (endHeaderWritten != sizeof(endHeader)) {
-            QString errorMsg = QString("文件结束协议头未完整发送\n已发送: %1 字节/应发送: %2 字节")
-                                   .arg(endHeaderWritten)
-                                   .arg(sizeof(endHeader));
-
-            QMessageBox::warning(this, "文件传输警告", errorMsg);
-            qWarning() << "Incomplete file end header write:" << errorMsg;
-            //后续加上重传
+        if (endHeaderWritten == -1 || endHeaderWritten != sizeof(endHeader)) {
+            // 错误处理略
         }
         task.file->close();
         delete task.file;
@@ -454,11 +439,11 @@ void Widget::sendNextChunk(quint32 msg_id)
             delete task.timer;
         }
         sendTasks.remove(msg_id);
-
+        // 文件发送完成后清理fileBrowser
+        //ui->fileBrowser->clear();
         // 添加时间戳显示
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         ui->serveBrowser->append(QString("[%1]\n[我] 发送了文件：%2").arg(currentTime, task.filename));
-        ui->fileBrowser->clear();
         return;
     }
     if (task.acked[task.current_chunk]) {
@@ -469,7 +454,7 @@ void Widget::sendNextChunk(quint32 msg_id)
     task.file->seek(task.current_chunk * CHUNK_SIZE);
     QByteArray chunk = task.file->read(CHUNK_SIZE);
     PacketHeader chunkHeader = {};
-    chunkHeader.version = MY_PROTOCOOL_VERSION;
+    chunkHeader.version = MY_PROTOCOL_VERSION;
     chunkHeader.msg_type = MSG_TYPE_FILE_CHUNK;
     chunkHeader.datalen = qToBigEndian<quint32>(chunk.size());
     chunkHeader.filename_len = 0;
@@ -610,7 +595,7 @@ void Widget::resendCurrentChunk(quint32 msg_id)
     }
 
     PacketHeader chunkHeader = {};
-    chunkHeader.version = MY_PROTOCOOL_VERSION;
+    chunkHeader.version = MY_PROTOCOL_VERSION;
     chunkHeader.msg_type = MSG_TYPE_FILE_CHUNK;
     chunkHeader.datalen = qToBigEndian<quint32>(chunk.size());
     chunkHeader.filename_len = 0;
@@ -667,12 +652,14 @@ void Widget::handleAck(const PacketHeader& header)
         textSendTasks[msg_id].timer->stop();
         delete textSendTasks[msg_id].timer;
         textSendTasks.remove(msg_id);
+        qDebug() << "文本消息ACK确认，msg_id:" << msg_id;
     }
     // 文件名ACK
     if (fileNameSendTasks.contains(msg_id) && chunk_index == 0) {
         fileNameSendTasks[msg_id].timer->stop();
         delete fileNameSendTasks[msg_id].timer;
         fileNameSendTasks.remove(msg_id);
+        qDebug() << "文件名ACK确认，msg_id:" << msg_id;
     }
     // 文件块ACK
     if (sendTasks.contains(msg_id)) {
@@ -683,6 +670,13 @@ void Widget::handleAck(const PacketHeader& header)
             task.current_chunk++;
             sendNextChunk(msg_id);
         }
+        qDebug() << "文件块ACK确认，msg_id:" << msg_id << "chunk:" << chunk_index;
+    }
+
+    // 拒绝消息ACK（新增）
+    if (chunk_index == 0 && !textSendTasks.contains(msg_id) &&
+        !fileNameSendTasks.contains(msg_id) && !sendTasks.contains(msg_id)) {
+        qDebug() << "拒绝消息ACK确认，msg_id:" << msg_id;
     }
 }
 
@@ -787,6 +781,14 @@ void Widget::handleFileStart(const PacketHeader& header)
         return;
     }
     QString filename = QString::fromUtf8(filenameData);
+
+    // 检查是否已经存在该文件传输
+    if (recvFiles.contains(msg_id)) {
+        qWarning() << "文件传输已存在，忽略重复的文件开始包: msg_id=" << msg_id;
+        sendAck(msg_id, 0);
+        return;
+    }
+
     FileRecvInfo info;
     info.filename = filename;
     info.filesize = filesize;
@@ -806,6 +808,7 @@ void Widget::handleFileStart(const PacketHeader& header)
         QMessageBox::critical(this, "错误", "无法创建临时文件: " + tempPath);
         delete info.file;
         info.file = nullptr;
+        sendAck(msg_id, 0);
         return;
     }
     recvFiles[msg_id] = info;
@@ -815,6 +818,7 @@ void Widget::handleFileStart(const PacketHeader& header)
         updateFileSlot(slot, filename, filesize, 0);
         if (slot < 0 || slot > 2) {
             qWarning() << "updateFileSlot: invalid slot" << slot;
+            sendAck(msg_id, 0);
             return;
         }
         // 只显示文件名、大小和操作按钮，进度条保持隐藏
@@ -838,6 +842,7 @@ void Widget::handleFileStart(const PacketHeader& header)
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         QString senderText = QString("[客户端%1] ").arg(sender_id);
         ui->serveBrowser->append(QString("[%1]\n%2发送文件：%3").arg(currentTime, senderText, filename));
+
     }
     sendAck(msg_id, 0);
 }
@@ -873,11 +878,23 @@ void Widget::handleFileChunk(const PacketHeader& header)
                                .arg(msg_id)
                                .arg(chunk_index);
         qWarning() << errorMsg;
+        // 即使文件不存在，也要发送ACK避免服务端重传
+        sendAck(msg_id, chunk_index);
         return;
     }
     FileRecvInfo& info = recvFiles[msg_id];
+
+    // 检查文件是否已被拒绝
+    if (!info.accepted) {
+        qDebug() << "文件已被拒绝，丢弃分片: msg_id=" << msg_id << "chunk=" << chunk_index;
+        // 发送ACK避免服务端重传
+        sendAck(msg_id, chunk_index);
+        return;
+    }
+
     if (!info.file) {
         qWarning() << "未打开临时文件，丢弃分片";
+        sendAck(msg_id, chunk_index);
         return;
     }
     if (chunk_index >= info.chunk_count) {
@@ -887,6 +904,7 @@ void Widget::handleFileChunk(const PacketHeader& header)
                                .arg(info.filename);
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
+        sendAck(msg_id, chunk_index);
         return;
     }
     qint64 offset = qint64(chunk_index) * CHUNK_SIZE;
@@ -895,6 +913,7 @@ void Widget::handleFileChunk(const PacketHeader& header)
                                .arg(QString::number(offset), info.filename, info.file->errorString());
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
+        sendAck(msg_id, chunk_index);
         return;
     }
     qint64 written = info.file->write(chunk);
@@ -903,6 +922,7 @@ void Widget::handleFileChunk(const PacketHeader& header)
                                .arg(QString::number(chunk.size()), QString::number(written), info.filename, info.file->errorString());
         qCritical() << errorMsg;
         QMessageBox::critical(this, "文件传输错误", errorMsg);
+        sendAck(msg_id, chunk_index);
         return;
     }
     if (!info.received[chunk_index]) {
@@ -931,9 +951,18 @@ void Widget::handleFileEnd(const PacketHeader& header)
     }
     if (!recvFiles.contains(msg_id)) {
         qWarning() << "文件结束块失败: 无效的消息ID" << msg_id;
+        sendAck(msg_id, 0);
         return;
     }
     FileRecvInfo& info = recvFiles[msg_id];
+
+    // 检查文件是否已被拒绝
+    if (!info.accepted) {
+        qDebug() << "文件已被拒绝，忽略文件结束包: msg_id=" << msg_id;
+        sendAck(msg_id, 0);
+        return;
+    }
+
     info.end_received = true; // 标记收到文件结束包
 
     // 不再直接更新UI，而是检查是否完成
@@ -946,7 +975,7 @@ void Widget::handleFileEnd(const PacketHeader& header)
 void Widget::sendAck(quint32 msg_id, quint32 chunk_index)
 {
     PacketHeader ack = {};
-    ack.version = MY_PROTOCOOL_VERSION;
+    ack.version = MY_PROTOCOL_VERSION;
     ack.msg_type = MSG_TYPE_ACK;
     ack.datalen = 0;
     ack.filename_len = 0;
@@ -1094,7 +1123,8 @@ void Widget::handleAccept(int slotIndex)
     QLabel* fileicolabel[3] = {ui->fileicolabel1,ui->fileicolabel2,ui->fileicolabel3};
     acceptBtn[slotIndex]->setVisible(false);
     saveasBtn[slotIndex]->setVisible(false);
-    refuseBtn[slotIndex]->setVisible(false);
+    // 保持refuse按钮显示，方便用户随时取消接收
+    refuseBtn[slotIndex]->setVisible(true);
     nameLabel[slotIndex]->setVisible(true);
     sizeLabel[slotIndex]->setVisible(true);
     bar[slotIndex]->setVisible(true); // 只有点击接受后才显示进度条
@@ -1131,7 +1161,8 @@ void Widget::handleSaveAs(int slotIndex)
     QLabel* fileicolabel[3] = {ui->fileicolabel1,ui->fileicolabel2,ui->fileicolabel3};
     acceptBtn[slotIndex]->setVisible(false);
     saveasBtn[slotIndex]->setVisible(false);
-    refuseBtn[slotIndex]->setVisible(false);
+    // 保持refuse按钮显示，方便用户随时取消接收
+    refuseBtn[slotIndex]->setVisible(true);
     nameLabel[slotIndex]->setVisible(true);
     sizeLabel[slotIndex]->setVisible(true);
     bar[slotIndex]->setVisible(true);
@@ -1146,6 +1177,19 @@ void Widget::handleRefuse(int slotIndex)
     int msg_id = slotMsgIds[slotIndex];
     if (recvFiles.contains(msg_id)) {
         FileRecvInfo& info = recvFiles[msg_id];
+
+        // 如果文件正在接收中，给出相应提示
+        if (info.accepted && !info.end_received) {
+            QMessageBox::StandardButton reply = QMessageBox::question(this, "取消接收",
+                                                                      QString("文件 '%1' 正在接收中，确定要取消接收吗？").arg(info.filename),
+                                                                      QMessageBox::Yes | QMessageBox::No);
+
+            if (reply == QMessageBox::No) {
+                return; // 用户选择不取消
+            }
+        }
+
+        // 清理文件资源
         if (info.file) {
             info.file->close();
             delete info.file;
@@ -1154,10 +1198,59 @@ void Widget::handleRefuse(int slotIndex)
         if (!info.tempFilePath.isEmpty()) {
             QFile::remove(info.tempFilePath);
         }
+
+        // 根据文件状态给出不同的提示
+        if (info.accepted && !info.end_received) {
+            QMessageBox::information(this, "取消接收", "文件接收已取消");
+        } else {
+            QMessageBox::information(this, "拒绝文件", "文件已被拒绝");
+        }
+
         recvFiles.remove(msg_id);
     }
     clearFileSlot(slotIndex);
-    QMessageBox::information(this, "拒绝文件", "文件已被拒绝");
+
+    // 新增：发送MSG_TYPE_REFUSE消息给服务端
+    PacketHeader refuseHeader = {};
+    refuseHeader.version = MY_PROTOCOL_VERSION;
+    refuseHeader.msg_type = MSG_TYPE_REFUSE;
+    refuseHeader.datalen = 0;
+    refuseHeader.filename_len = 0;
+    refuseHeader.file_size = 0;
+    refuseHeader.msg_id = qToBigEndian<quint32>(msg_id);
+    refuseHeader.chunk_index = 0;
+    refuseHeader.chunk_count = 0;
+    refuseHeader.sender_id = qToBigEndian<quint32>(clientId);
+    refuseHeader.crc32 = qToBigEndian<quint32>(calculateHeaderCRC32(refuseHeader));
+
+    // 发送拒绝消息
+    qint64 refuseWritten = socket->write(reinterpret_cast<const char*>(&refuseHeader), sizeof(refuseHeader));
+    if (refuseWritten == -1) {
+        qWarning() << "发送拒绝消息失败:" << socket->errorString();
+    } else if (refuseWritten != sizeof(refuseHeader)) {
+        qWarning() << "拒绝消息发送不完整:" << refuseWritten << "/" << sizeof(refuseHeader);
+    } else {
+        qDebug() << "拒绝消息发送成功，msg_id:" << msg_id;
+    }
+    // 清理重传任务
+    if (sendTasks.contains(msg_id)) {
+        FileSendTask& task = sendTasks[msg_id];
+        if (task.timer) {
+            task.timer->stop();
+            delete task.timer;
+        }
+        sendTasks.remove(msg_id);
+    }
+    if (fileNameSendTasks.contains(msg_id)) {
+        fileNameSendTasks[msg_id].timer->stop();
+        delete fileNameSendTasks[msg_id].timer;
+        fileNameSendTasks.remove(msg_id);
+    }
+    if (textSendTasks.contains(msg_id)) {
+        textSendTasks[msg_id].timer->stop();
+        delete textSendTasks[msg_id].timer;
+        textSendTasks.remove(msg_id);
+    }
 }
 
 void Widget::checkForCompletion(quint32 msg_id)
@@ -1182,8 +1275,7 @@ void Widget::checkForCompletion(quint32 msg_id)
             // 确保进度条是100%
             updateFileSlot(slot, info.filename, info.filesize, 100);
             QMessageBox::information(this, "文件接收完成", QString("文件 '%1' 已成功接收。").arg(info.filename));
-            // 可以在这里延迟后清理槽位
-            // clearFileSlot(slot);
+            // 文件接收完成后，清理槽位（包括隐藏refuse按钮）
             clearFileSlot(slot);
             recvFiles.remove(msg_id);
         }
@@ -1288,7 +1380,7 @@ void Widget::resendTextMessage(quint32 msg_id)
 
     QByteArray data = task.text.toUtf8();
     PacketHeader header = {};
-    header.version = MY_PROTOCOOL_VERSION;
+    header.version = MY_PROTOCOL_VERSION;
     header.msg_type = MSG_TYPE_TEXT;
     header.datalen = qToBigEndian<quint32>(data.size());
     header.filename_len = 0;
@@ -1346,7 +1438,7 @@ void Widget::resendFileName(quint32 msg_id)
     if (!sendTasks.contains(msg_id)) return;
     FileSendTask& fileTask = sendTasks[msg_id];
     PacketHeader startHeader = {};
-    startHeader.version = MY_PROTOCOOL_VERSION;
+    startHeader.version = MY_PROTOCOL_VERSION;
     startHeader.msg_type = MSG_TYPE_FILE_START;
     startHeader.datalen = 0;
     startHeader.filename_len = qToBigEndian<quint32>(filenameData.size());
