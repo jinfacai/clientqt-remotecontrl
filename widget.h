@@ -9,6 +9,12 @@
 #include <QMap>
 #include <QDir>
 #include <boost/crc.hpp>
+#include <QDebug>
+#include <QMutex>
+#include <QQueue>
+#include <QPair>
+#include <QThread>
+#include <QSharedPointer>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
@@ -53,9 +59,13 @@ struct FileRecvInfo {
     bool accepted;
     QString saveasPath;
     bool end_received;
-    QString tempFilePath; // 临时文件路径
-    bool acceptProgressInitialized; // 新增：接受时是否初始化进度条
-    FileRecvInfo() : filesize(0), chunk_count(0), file(nullptr), received_chunks(0), accepted(false), end_received(false), acceptProgressInitialized(false) {}
+    QString tempFilePath;
+    bool acceptProgressInitialized;
+    QMap<quint32, QByteArray> pendingChunks;
+    QMutex mutex;
+    QQueue<QPair<quint32, QByteArray>> chunkQueue;
+    QThread* workerThread = nullptr;
+    FileRecvInfo() : filesize(0), chunk_count(0), file(nullptr), received_chunks(0), accepted(false), end_received(false), acceptProgressInitialized(false), workerThread(nullptr) {}
 };
 
 struct FileSendTask {
@@ -94,6 +104,9 @@ public:
     Widget(QWidget *parent = nullptr);
     ~Widget();
 
+signals:
+    void fileChunkWritten(quint32 msg_id, quint32 chunk_index);
+
 private slots:
     void connectToServer();
     void onConnected();
@@ -118,6 +131,7 @@ private slots:
     void handleAccept(int slotIndex);
     void handleSaveAs(int slotIndex);
     void handleRefuse(int slotIndex);
+    void onFileChunkWritten(quint32 msg_id, quint32 chunk_index);
 
 private:
     QString formatFileSize(quint64 bytes);
@@ -147,11 +161,14 @@ private:
     void initAcceptProgress(int slotIndex, FileRecvInfo& info);
     QString elideFileName(const QString& name, int maxLen = 20);
 
+    // 新增：自动拒绝消息辅助函数声明
+    void sendRefuseMessage(quint32 msg_id);
+
 private:
     Ui::Widget *ui;
     QTcpSocket* socket;
     QString selectedFilePath;
-    QMap<quint32, FileRecvInfo> recvFiles; // msg_id -> FileRecvInfo
+    QMap<quint32, QSharedPointer<FileRecvInfo>> recvFiles; // msg_id -> FileRecvInfo
     QVector<quint32> slotMsgIds; // 槽位对应的msg_id
     QMap<quint32, FileSendTask> sendTasks;
     QMap<quint32, TextSendTask> textSendTasks;
@@ -161,5 +178,6 @@ private:
     void resendTextMessage(quint32 msg_id);
     void resendFileName(quint32 msg_id);
 };
+
 
 #endif // WIDGET_H
