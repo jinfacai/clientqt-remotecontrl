@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstring>
 
-
 class CPacket : public QObject
 {
     Q_OBJECT
@@ -43,24 +42,28 @@ public:
     // 获取命令
     uint16_t getCmd() const { return sCmd; }
 
-    // 获取数据
+    // 获取数据（Qt 端使用 QByteArray）
     const QByteArray& getData() const { return strData; }
 
-    // 设置数据
+    // 设置数据（Qt 端使用 QByteArray）
     void setData(const QByteArray& data);
+
+    // Qt兼容方法：获取QString格式的数据
+    QString getDataAsQString() const { return QString::fromUtf8(strData); }
+
+    // Qt兼容方法：设置QString格式的数据
+    void setDataFromQString(const QString& data) { strData = data.toUtf8(); }
 
     // 设置命令
     void setCmd(uint16_t cmd);
-
 #pragma pack(push, 1)
-
 private:
     uint16_t sHead;     // 2字节 - 包头标识 0xFEFF
     uint32_t sLength;   // 4字节 - 数据长度
     uint16_t sCmd;      // 2字节 - 命令
     uint16_t sSum;      // 2字节 - 校验和
-    QByteArray strData; // 数据内容
-    QByteArray strOut;  // 输出缓冲区
+    QByteArray strData; // 数据内容 - Qt 使用 QByteArray
+    mutable QByteArray strOut;  // 输出缓冲区
 
     // 计算校验和
     uint16_t calculateChecksum() const;
@@ -68,6 +71,5 @@ private:
     // 验证数据包完整性
     bool validatePacket(const uint8_t* pData, size_t nSize) const;
 };
-
 #pragma pack(pop)
 #endif // PACKET_H

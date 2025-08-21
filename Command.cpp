@@ -1,5 +1,5 @@
 #include "Command.h"
-#include<QDataStream>
+#include <QDataStream>
 
 std::unique_ptr<CCommand> CCommand::createCommand(Type type, QObject* parent)
 {
@@ -8,31 +8,36 @@ std::unique_ptr<CCommand> CCommand::createCommand(Type type, QObject* parent)
     case Type::FILE_START:    return std::unique_ptr<CCommand>(new FileStartCommand(parent));
     case Type::FILE_DATA:     return std::unique_ptr<CCommand>(new FileDataCommand(parent));
     case Type::FILE_COMPLETE: return std::unique_ptr<CCommand>(new FileCompleteCommand(parent));
+    case Type::TEST_CONNECT:  return std::unique_ptr<CCommand>(new TestConnectCommand(parent));
     default:                  return nullptr;
     }
 }
 
+// TextMessageCommand实现
 TextMessageCommand::TextMessageCommand(QObject* parent)
-    :CCommand(parent)
+    : CCommand(parent)
 {
 }
 
-TextMessageCommand::TextMessageCommand(const QString& message,QObject* parent)
-    :CCommand(parent), message_(message)
+TextMessageCommand::TextMessageCommand(const QString& message, QObject* parent)
+    : CCommand(parent), message_(message)
 {
 }
 
 QByteArray TextMessageCommand::serialize() const
 {
+    // 直接使用UTF-8编码，与Linux端保持一致
     return message_.toUtf8();
 }
 
 bool TextMessageCommand::deserialize(const QByteArray& data)
 {
+    // 直接使用UTF-8解码，与Linux端保持一致
     message_ = QString::fromUtf8(data);
     return true;
 }
 
+// FileStartCommand 实现
 FileStartCommand::FileStartCommand(QObject* parent)
     : CCommand(parent) {}
 
@@ -48,6 +53,7 @@ bool FileStartCommand::deserialize(const QByteArray& data) {
     return true;
 }
 
+// FileDataCommand 实现
 FileDataCommand::FileDataCommand(QObject* parent)
     : CCommand(parent) {}
 
@@ -63,11 +69,12 @@ bool FileDataCommand::deserialize(const QByteArray& data) {
     return true;
 }
 
+// FileCompleteCommand 实现
 FileCompleteCommand::FileCompleteCommand(QObject* parent)
     : CCommand(parent) {}
 
 QByteArray FileCompleteCommand::serialize() const {
-    return QByteArray();
+    return QByteArray(); // 空负载
 }
 
 bool FileCompleteCommand::deserialize(const QByteArray& data) {
@@ -75,12 +82,14 @@ bool FileCompleteCommand::deserialize(const QByteArray& data) {
     return true;
 }
 
+// TestConnectCommand 实现
 TestConnectCommand::TestConnectCommand(QObject* parent)
     : CCommand(parent)
 {
 }
 
 QByteArray TestConnectCommand::serialize() const {
+    // 返回"OK"消息，与Linux端保持一致
     return QByteArray("OK");
 }
 

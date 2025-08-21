@@ -15,10 +15,10 @@
 #include <QDir>
 #include <QDateTime>
 #include <QDebug>
+#include <memory>
 #include "ClientSocket.h"
 #include "Packet.h"
 #include "Command.h"
-#include <memory>
 
 class TestUI : public QWidget
 {

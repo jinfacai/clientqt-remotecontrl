@@ -89,7 +89,7 @@ TestUI::TestUI(QWidget *parent)
     connect(m_selectFileButton, &QPushButton::clicked, this, &TestUI::onSelectFileButtonClicked);
     connect(m_sendFileButton, &QPushButton::clicked, this, &TestUI::onSendFileButtonClicked);
 
-    // 连接NetworkClient信号
+    // 连接客户端信号
     connect(m_networkClient, &ClientSocket::connectionStateChanged, this, &TestUI::onConnectionStateChanged);
     connect(m_networkClient, &ClientSocket::packetReceived, this, &TestUI::onPacketReceived);
     connect(m_networkClient, &ClientSocket::errorOccurred, this, &TestUI::onNetworkError);
@@ -238,11 +238,8 @@ void TestUI::sendTextMessage(const QString& text)
         return;
     }
 
-    // 使用封装的Command类发送文本消息
-    auto textCommand = std::make_unique<TextMessageCommand>(text);
-    QByteArray serializedData = textCommand->serialize();
-
-    if (m_networkClient->sendCommand(static_cast<uint16_t>(CCommand::Type::TEXT_MESSAGE), serializedData)) {
+    // 直接使用命令接口发送文本消息
+    if (m_networkClient->sendCommand(static_cast<quint16>(CCommand::Type::TEXT_MESSAGE), text.toUtf8())) {
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         logMessage(QString("[%1] 发送文本: %2").arg(currentTime, text));
     } else {
@@ -268,39 +265,26 @@ void TestUI::sendFileMessage(const QString& filePath)
 
     QString fileName = QFileInfo(filePath).fileName();
 
-    // 1. 发送文件开始命令（包含文件名）
-    auto startCommand = std::make_unique<FileStartCommand>(fileName);
-    QByteArray startData = startCommand->serialize();
-
-    if (m_networkClient->sendCommand(static_cast<uint16_t>(CCommand::Type::FILE_START), startData)) {
-        QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
-        logMessage(QString("[%1] 发送文件开始: %2").arg(currentTime, fileName));
-    } else {
-        QMessageBox::critical(this, "发送失败", "无法发送文件开始命令");
+    // 发送文件开始
+    if (!m_networkClient->sendCommand(static_cast<quint16>(CCommand::Type::FILE_START), fileName.toUtf8())) {
+        QMessageBox::critical(this, "发送失败", "无法发送文件开始到服务器");
         return;
     }
-
-    // 2. 发送文件数据命令
-    auto dataCommand = std::make_unique<FileDataCommand>(fileData);
-    QByteArray dataData = dataCommand->serialize();
-
-    if (m_networkClient->sendCommand(static_cast<uint16_t>(CCommand::Type::FILE_DATA), dataData)) {
-        QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
-        logMessage(QString("[%1] 发送文件数据: %2 字节").arg(currentTime).arg(fileData.size()));
-    } else {
-        QMessageBox::critical(this, "发送失败", "无法发送文件数据");
-        return;
+    // 分块发送数据
+    const int chunkSize = 1024;
+    for (int i = 0; i < fileData.size(); i += chunkSize) {
+        QByteArray chunk = fileData.mid(i, chunkSize);
+        if (!m_networkClient->sendCommand(static_cast<quint16>(CCommand::Type::FILE_DATA), chunk)) {
+            QMessageBox::critical(this, "发送失败", "文件数据发送中断");
+            return;
+        }
     }
-
-    // 3. 发送文件完成命令（可选）
-    auto completeCommand = std::make_unique<FileCompleteCommand>();
-    QByteArray completeData = completeCommand->serialize();
-
-    if (m_networkClient->sendCommand(static_cast<uint16_t>(CCommand::Type::FILE_COMPLETE), completeData)) {
+    // 发送完成
+    if (m_networkClient->sendCommand(static_cast<quint16>(CCommand::Type::FILE_COMPLETE), QByteArray())) {
         QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
-        logMessage(QString("[%1] 发送文件结束").arg(currentTime));
+        logMessage(QString("[%1] 发送文件: %2 (%3 字节)").arg(currentTime, fileName).arg(fileData.size()));
     } else {
-        QMessageBox::warning(this, "警告", "无法发送文件完成命令");
+        QMessageBox::critical(this, "发送失败", "无法发送文件到服务器");
     }
 }
 

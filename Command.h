@@ -4,23 +4,31 @@
 #include <QObject>
 #include <QString>
 #include <QByteArray>
-//#include <memory>
-//#include <cstdint>
+#include <memory>
+#include <cstdint>
 
-class CCommand : public QObject{
+class CCommand : public QObject {
     Q_OBJECT
+
 public:
-    enum class Type : uint16_t{
-        TEXT_MESSAGE = 1,
-        FILE_START    = 2,
-        FILE_DATA     = 3,
-        FILE_COMPLETE = 4,
-        TEST_CONNECT  = 1981
+    // 命令类型（与 Linux 端保持一致）
+    enum class Type : uint16_t {
+        UNKNOWN       = 0,
+        TEXT_MESSAGE  = 1,   // 聊天消息
+        FILE_START    = 2,   // 文件首包
+        FILE_DATA     = 3,   // 文件数据
+        FILE_COMPLETE = 4,   // 文件传输完成
+        TEST_CONNECT  = 1981 // 测试连接
     };
+
+    // 转换为Linux端使用的数值类型
+    static uint16_t toUint16(Type type) { return static_cast<uint16_t>(type); }
+    static Type fromUint16(uint16_t value) { return static_cast<Type>(value); }
     Q_ENUM(Type)
 
-    explicit CCommand(QObject* parent = nullptr) : QObject(parent){}
+    explicit CCommand(QObject* parent = nullptr) : QObject(parent) {}
     virtual ~CCommand() = default;
+
     // 获取命令类型
     virtual Type getType() const = 0;
 
@@ -87,7 +95,7 @@ private:
     QByteArray data_;
 };
 
-// 文件完成命令
+// 文件完成命令（可为空负载）
 class FileCompleteCommand : public CCommand {
     Q_OBJECT
 public:
@@ -108,6 +116,4 @@ public:
     QByteArray serialize() const override;
     bool deserialize(const QByteArray& data) override;
 };
-
-
 #endif // COMMAND_H

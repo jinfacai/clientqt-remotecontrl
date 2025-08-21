@@ -26,9 +26,10 @@ public:
     //发送数据包
     bool sendPacket(const CPacket& packet);
 
-    //发送命令
-    //bool sendCommand(std::unique_ptr<CCommand> command);
-    bool sendCommand(uint16_t cmd, const QByteArray& data);
+    //发送命令（对象）
+    bool sendCommand(std::unique_ptr<CCommand> command);
+    //发送命令（兼容旧接口：cmd + data）
+    bool sendCommand(quint16 cmd, const QByteArray& data); // Qt风格重载
 
     // 发送文本消息
     bool sendTextMessage(const QString& message);
